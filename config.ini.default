@@ -1,0 +1,11 @@
+[account]
+api_id = 
+api_hash = 
+owner = 
+api_key = 
+
+[fuduji]
+target_group = 
+auth_user = []
+ignore_user = []
+auth_token = password
