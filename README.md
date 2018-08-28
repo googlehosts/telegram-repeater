@@ -4,8 +4,9 @@ Repeater deletes your message and replaces it with the message the bot sends wit
 
 ## Feature
 
-* Support Text messages
-* Reply function available (texts only)
+* Support rich text messages
+* Support media except voice message
+* Reply function available
 
 ## Operating Environment
 
