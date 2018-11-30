@@ -6,6 +6,14 @@ api_key =
 
 [fuduji]
 target_group = 
-auth_user = []
-ignore_user = []
-auth_token = password
+auth_user = 
+ignore_user = 
+bot_id = 
+fudu_group = 
+replace_to_id = 
+
+[database]
+host = 
+user = 
+passwd = 
+db_name = 
