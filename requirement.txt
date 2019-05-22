@@ -1,0 +1,3 @@
+pyrogram==0.11.0
+pymysql
+tgcrypto
