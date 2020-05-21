@@ -3,18 +3,23 @@ api_id =
 api_hash =
 owner =
 api_key =
+
+[join_group_verify]
+enable = false
+
+[custom_service]
+enable = false
 custom_api_key =
-emerg_contact =
+help_group =
 
 [fuduji]
 target_group =
-auth_user =
-ignore_user =
 bot_id =
 fudu_group =
-help_group =
 replace_to_id =
-whitelist =
+
+[i18n]
+language=en_US
 
 [database]
 host = 

@@ -8,7 +8,7 @@ The bot forwards your messages to another group.
 * Support media (except voice messages).
 * Reply function available.
 * Anonymity: Protect the identity of the user.
-* Authorised users in this group can manage the target group function, such as `/ban`, `/del`, `/kick`, etc.
+* Authorised users in this group can manage the target group function, such as `/ban`, `/del`, `/grant`, `/kick`, etc.
 * Use MySQL engine to mark the time, message ID and user ID.
 * When the bot is mentioned in the target group, the user ID specified in the config file will also be mentioned in this group.
 * Once promoted to admin, the bot can add new admins. 
@@ -17,12 +17,14 @@ The bot forwards your messages to another group.
 
 ## Operating Environment
 
-Python 3.4 and above is required
+Python 3.7 and above is required
 
 The following libraries are required:
 
-- pyrogram (==0.11.0)
-- pymysql
+- pyrogram.async (==0.17.0)
+- aiomysql
+- aioredis
+- aiofile
 
 ## Configure
 
@@ -44,35 +46,38 @@ The following libraries are required:
 
 ## Instruction
 
-* Use `python3 main.py` or other command lines to run the program.
+* Use `python3 repeater.py` or other command lines to run the program.
 * Log in using the account you set in the `owner` field.
 * If you want to authorize a certain user, you should invite the user to this group first, then use `/auth`.
-* To turn off the repeater, send `/bot off` (`/boff` also available) to the target group, vice versa.
+* To turn off the repeater, send `/off` to the target group, vice versa.
 
 ## Available Commands
 
 Command | Description | Reply to the message
 ---|---|---
-`/bon` or `/boff` | Switch on/off the bot | False
-`/status` | check the user's authorization status| False
+`/on` or `/off` | Switch on/off the bot | False
+`/status` | check the user's authorization status | False
 `/auth` | authorize to another user | True
-`/ban` | put restrictions on the target user, a certain length of time can be specified (e.g. `/ban` 1m means to restrict the user for one minute) | True
+`/ban` | put restrictions on the target user, a certain length of time can be specified (e.g. `/ban 1m` means to restrict the user for one minute) | True
 `/kick` | remove the user from the target group | True
 `/fw` | forward a message to the target group using the bot account | True
 `/get` | forward the original message to this group | True
 `/del` | delete the selected message in the target group | True
-`/p` | gain admin access immediately for yourself in the target group | False
+`/sudo` or `/su` | gain admin access immediately for yourself in the target group | False
 `/promote` | authorise other users to become admins | True
+`/grant` | grant specify privileges to specify user in group | False
+`/pin` | pin a message in group | True
+`/warn` | send a warn to user with reason | True
 
 ## Special Thanks
 
-Special thanks to Group:J, who helped me with the translation.
+Special thanks to `<unknown resource>`, who helped me with the translation.
 
 ## License
 
 [![](https://www.gnu.org/graphics/agplv3-155x51.png)](https://www.gnu.org/licenses/agpl-3.0.txt)
 
-Copyright (C) 2018-2019 github.com/googlehosts Group:Z
+Copyright (C) 2018-2020 github.com/googlehosts Group:Z
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or any later version.
 
