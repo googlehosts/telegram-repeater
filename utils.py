@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # utils.py
 # Copyright (C) 2018-2020 github.com/googlehosts Group:Z
@@ -17,7 +18,6 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
-import ast
 import asyncio
 import concurrent.futures
 import logging
@@ -25,20 +25,22 @@ import random
 import string
 import time
 import traceback
+import warnings
 from configparser import ConfigParser
 from dataclasses import dataclass
 from typing import (Dict, List, Mapping, Optional, Sequence, SupportsBytes,
                     Tuple, TypeVar, Union)
 
-import aiomysql
-from pyrogram import (Client, InlineKeyboardButton, InlineKeyboardMarkup,
-                      Message, MessageEntity, User)
+import asyncpg
+from pyrogram import Client
+from pyrogram.errors import FloodWait
+from pyrogram.types import (InlineKeyboardButton, InlineKeyboardMarkup,
+                            Message, MessageEntity, User)
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-_rT = TypeVar('_rT', str, Optional[int], SupportsBytes)
-_anyT = TypeVar('_anyT')
-_kT = TypeVar('_kT', str, int)
+_FixedDataType = TypeVar('_FixedDataType', str, bool, int)
 
 
 class TextParser:
@@ -145,13 +147,13 @@ class TextParser:
                         ))
 
     @staticmethod
-    def parse_user(user_id: int, user_name: Optional[str] = None) -> str:
+    def parse_user_markdown(user_id: Union[int, str], user_name: Optional[str] = None) -> str:
         if user_name is None:
             user_name = str(user_id)
         return f'[{user_name}](tg://user?id={user_id})'
 
     @staticmethod
-    def parse_user_ex(user_id: int, user_name: Optional[str] = None) -> str:
+    def parse_user_html(user_id: int, user_name: Optional[str] = None) -> str:
         if user_name is None:
             user_name = str(user_id)
         return f'<a href="tg://user?id={user_id}">{user_name}</a>'
@@ -163,84 +165,66 @@ class TextParser:
         return name
 
 
-class MySQLdb:
+class PgSQLdb:
 
     def __init__(
             self,
             host: str,
+            port: int,
             user: str,
             password: str,
             db: str,
-            charset: str = 'utf8mb4',
-            cursorclass: aiomysql.Cursor = aiomysql.DictCursor
     ):
         self.logger: logging.Logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.DEBUG)
         self.host: str = host
+        self.port: int = port
         self.user: str = user
         self.password: str = password
         self.db: str = db
-        self.charset: str = charset
-        self.cursorclass: aiomysql.Cursor = cursorclass
-        self.execute_lock: asyncio.Lock = asyncio.Lock()
-        self.mysql_connection = None
+        self.pgsql_connection: asyncpg.connection = None
 
     async def create_connect(self) -> None:
-        self.mysql_connection = await aiomysql.create_pool(
+        self.pgsql_connection = await asyncpg.connect(
             host=self.host,
+            port=self.port,
             user=self.user,
             password=self.password,
-            db=self.db,
-            charset=self.charset,
-            cursorclass=self.cursorclass,
+            database=self.db
         )
 
     @classmethod
     async def create(cls,
                      host: str,
+                     port: int,
                      user: str,
                      password: str,
                      db: str,
-                     charset: str = 'utf8mb4',
-                     cursorclass: aiomysql.Cursor = aiomysql.DictCursor,
-                     ) -> 'MySQLdb':
-        self = MySQLdb(host, user, password, db, charset, cursorclass)
+                     ) -> 'PgSQLdb':
+        self = cls(host, port, user, password, db)
         await self.create_connect()
         return self
 
-    async def promise_query1(self, sql: str, args: Union[Sequence[_anyT], _anyT] = ()) -> Mapping[_kT, _rT]:
-        obj = await self.query1(sql, args)
-        if obj is None:
-            raise RuntimeError()
-        return obj
+    async def query(self, sql: str, *args: Optional[_FixedDataType]) -> Tuple[asyncpg.Record, ...]:
+        return await self.pgsql_connection.fetch(sql, *args)
 
-    async def query(self, sql: str, args: Union[Sequence[_anyT], _anyT] = ()) -> Tuple[Mapping[_kT, _rT], ...]:
-        async with self.mysql_connection.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(sql, args)
-                return await cur.fetchall()
+    async def query1(self, sql: str, *args: Optional[_FixedDataType]) -> Optional[asyncpg.Record]:
+        return await self.pgsql_connection.fetchrow(sql, *args)
 
-    async def query1(self, sql: str, args: Union[Sequence[_anyT], _anyT] = ()) -> Optional[Mapping[_kT, _rT]]:
-        async with self.mysql_connection.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(sql, args)
-                return await cur.fetchone()
-
-    async def execute(self, sql: str, args: Union[Sequence[_anyT], Sequence[Sequence[_anyT]], _anyT] = (),
-                      many: bool = False) -> None:
-        async with self.mysql_connection.acquire() as conn:
-            async with conn.cursor() as cur:
-                await (cur.executemany if many else cur.execute)(sql, args)
-            await conn.commit()
+    async def execute(self, sql: str, *args: Union[Sequence[Tuple[_FixedDataType, ...]],
+                                                   Optional[_FixedDataType]], many: bool = False) -> None:
+        if many:
+            await self.pgsql_connection.executemany(sql, *args)
+        else:
+            await self.pgsql_connection.execute(sql, *args)
 
     async def close(self) -> None:
-        self.mysql_connection.close()
-        await self.mysql_connection.wait_closed()
+        await self.pgsql_connection.close()
 
     async def insert_ex(self, id1: int, id2: int, user_id: Optional[int] = None) -> None:
         await self.execute(
-            'INSERT INTO `msg_id` (`msg_id`, `target_id`, `timestamp`, `user_id`) VALUES (%s, %s, CURRENT_TIMESTAMP(), %s)',
-            (id1, id2, user_id))
+            '''INSERT INTO "msg_id" VALUES ($1, $2, CURRENT_TIMESTAMP, $3)''',
+            id1, id2, user_id)
 
     async def insert(self, msg: Message, msg_2: Message) -> None:
         try:
@@ -249,43 +233,44 @@ class MySQLdb:
             traceback.print_exc()
             await self.insert_ex(msg.message_id, msg_2.message_id)
 
-    async def get_user_id(self, msg: Union[Message, int]) -> Optional[Mapping[_kT, _rT]]:
+    async def get_user_id(self, msg: Union[Message, int]) -> Optional[asyncpg.Record]:
         return await self.query1(
-            'SELECT `user_id` FROM `msg_id` WHERE `msg_id` = (SELECT `msg_id` FROM `msg_id` WHERE `target_id` = %s)',
+            '''SELECT "user_id" FROM "msg_id" WHERE "msg_id" = (
+                   SELECT "msg_id" FROM "msg_id" WHERE "target_id" = $1
+            )''',
             (msg if isinstance(msg, int) else msg.reply_to_message.message_id))
 
     async def get_id(self, msg_id: int, reverse: bool = False) -> Optional[int]:
-        r = await self.query1('{} = %s'.format('SELECT `{}` FROM `msg_id` WHERE `{}`'.format(
+        r = await self.query1('{} = $1'.format('''SELECT "{}" FROM "msg_id" WHERE "{}"'''.format(
             *(('target_id', 'msg_id') if not reverse else ('msg_id', 'target_id')))), msg_id)
         return r['target_id' if not reverse else 'msg_id'] if r else None
 
     async def get_reply_id(self, msg: Message) -> Optional[int]:
         return await self.get_id(msg.reply_to_message.message_id) if msg.reply_to_message else None
 
-    async def get_reply_id_Reverse(self, msg: Message) -> Optional[int]:
+    async def get_reply_id_reverse(self, msg: Message) -> Optional[int]:
         return await self.get_id(msg.reply_to_message.message_id, True) if msg.reply_to_message else None
 
-    async def get_msg_name_history_channel_msg_id(self, msg: Message) -> int:
-        return (await self.query1(
-            'SELECT `channel_msg_id` FROM `username` WHERE `user_id` = (SELECT `user_id` FROM `msg_id` WHERE `target_id` = %s)',
-            msg.reply_to_message.message_id))['channel_msg_id']
-
     async def insert_new_warn(self, user_id: int, msg: str, msg_id: Optional[int]) -> int:
-        await self.execute("INSERT INTO `reasons` (`user_id`, `text`, `msg_id`) VALUE (%s, %s, %s)",
-                           (user_id, msg, msg_id))
+        await self.execute('''INSERT INTO "reasons" ("user_id", "text", "msg_id") VALUES ($1, $2, $3)''',
+                           user_id, msg, msg_id)
+        # FIXME:
         return (await self.query1("SELECT LAST_INSERT_ID()"))['LAST_INSERT_ID()']
 
     async def delete_warn_by_id(self, warn_id: int) -> None:
-        await self.execute("DELETE FROM `reasons` WHERE `user_id` = %s", warn_id)
+        await self.execute('''DELETE FROM "reasons" WHERE "user_id" = $1''', warn_id)
 
     async def query_warn_by_user(self, user_id: int) -> int:
-        return (await self.query1("SELECT COUNT(*) FROM `reasons` WHERE `user_id` = %s", user_id))['COUNT(*)']
+        return (await self.query1('''SELECT COUNT(*) FROM "reasons" WHERE "user_id" = $1''', user_id))['count']
 
     async def query_warn_reason_by_id(self, reason_id: int) -> str:
-        return (await self.promise_query1("SELECT `text` FROM `reasons` WHERE `id` = %s", reason_id))['text']
+        return (await self.query1('''SELECT "text" FROM "reasons" WHERE "id" = $1''', reason_id))['text']
 
     async def query_user_in_banlist(self, user_id: int) -> bool:
-        return await self.query1("SELECT * FROM `banlist` WHERE `id` = %s", user_id) is not None
+        return await self.query1('''SELECT * FROM "banlist" WHERE "id" = $1''', user_id) is not None
+
+    async def insert_user_to_banlist(self, user_id: int) -> None:
+        await self.execute('''INSERT INTO "banlist" ("id") VALUES ($1)''', user_id)
 
 
 class InviteLinkTracker:
@@ -313,7 +298,13 @@ class InviteLinkTracker:
         return self.future
 
     async def do_revoke(self) -> None:
-        self.current_link = await self.client.export_chat_invite_link(self.chat_id)
+        while True:
+            try:
+                self.current_link = await self.client.export_chat_invite_link(self.chat_id)
+                break
+            except FloodWait as e:
+                logger.warning('Got Floodwait, wait for %d seconds', e.x)
+                await asyncio.sleep(e.x)
         await self.revoke_users()
         self.last_revoke_time = time.time()
 
@@ -400,49 +391,57 @@ def get_random_string(length: int = 8) -> str:
     return ''.join(random.choices(string.ascii_lowercase, k=length))
 
 
-class _AuthSystem:
+class AuthSystem:
+    class_self = None
 
-    def __init__(self, conn: MySQLdb):
+    def __init__(self, conn: PgSQLdb):
         self.conn = conn
         self.authed_user: List[int] = []
         self.non_ignore_user: List[int] = []
         self.whitelist: List[int] = []
 
     async def init(self, owner: Optional[int] = None) -> None:
-        sqlObj = await self.conn.query("SELECT * FROM `auth_user`")
-        self.authed_user = [row['id'] for row in sqlObj if row['authorized'] == 'Y']
-        self.non_ignore_user = [row['id'] for row in sqlObj if row['muted'] == 'N']
-        self.whitelist = [row['id'] for row in sqlObj if row['whitelist'] == 'Y']
+        sql_obj = await self.conn.query('''SELECT "uid", "authorized", "muted", "whitelist" FROM "auth_user"''')
+        self.authed_user = [row['uid'] for row in sql_obj if row['authorized']]
+        self.non_ignore_user = [row['uid'] for row in sql_obj if not row['muted']]
+        self.whitelist = [row['uid'] for row in sql_obj if row['whitelist']]
         if owner is not None and owner not in self.authed_user:
             self.authed_user.append(owner)
 
     @classmethod
-    async def create(cls, conn: MySQLdb, owner: Optional[int] = None) -> '_AuthSystem':
-        self = _AuthSystem(conn)
-        await self.init(owner)
+    async def create(cls, conn: PgSQLdb, owner: Optional[int] = None) -> 'AuthSystem':
+        self = cls(conn)
+        try:
+            await self.init(owner)
+        except KeyError:
+            logger.critical('Got key error', exc_info=True)
         return self
 
     def check_ex(self, user_id: int) -> bool:
         return user_id in self.authed_user
 
-    async def add_user(self, user_id: int) -> None:
+    async def add_user(self, user_id: Union[str, int]) -> None:
+        user_id = int(user_id)
         self.authed_user.append(user_id)
         self.authed_user = list(set(self.authed_user))
-        if self.query_user(user_id) is not None:
-            await self.update_user(user_id, 'authorized', 'Y')
+        if await self.query_user(user_id) is not None:
+            await self.update_user(user_id, 'authorized', True)
         else:
-            await self.conn.execute("INSERT INTO `auth_user` (`id`, `authorized`) VALUE (%s, 'Y')", user_id)
+            await self.conn.execute('''INSERT INTO "auth_user" ("uid", "authorized") VALUES ($1, true)''', user_id)
 
-    async def update_user(self, user_id: int, column_name: str, value: str) -> None:
-        await self.conn.execute("UPDATE `auth_user` SET `{}` = %s WHERE `id` = %s".format(column_name),
-                                (value, user_id))
+    async def update_user(self, user_id: int, column_name: str, value: Union[str, bool]) -> None:
+        if isinstance(value, str):
+            warnings.warn('value should passed by bool instead', DeprecationWarning, 2)
+            value = value == 'Y'
+        await self.conn.execute('''UPDATE "auth_user" SET "{}" = $1 WHERE "uid" = $2'''.format(column_name),
+                                value, user_id)
 
-    async def query_user(self, user_id: int) -> Optional[Mapping[_kT, _rT]]:
-        return await self.conn.query1("SELECT * FROM `auth_user` WHERE `id` = %s", user_id)
+    async def query_user(self, user_id: int) -> Optional[asyncpg.Record]:
+        return await self.conn.query1('''SELECT * FROM "auth_user" WHERE "uid" = $1''', user_id)
 
     async def del_user(self, user_id: int) -> None:
         self.authed_user.remove(user_id)
-        await self.update_user(user_id, 'authorized', 'N')
+        await self.update_user(user_id, 'authorized', False)
 
     def check_muted(self, user_id: int) -> bool:
         return user_id not in self.non_ignore_user
@@ -450,11 +449,11 @@ class _AuthSystem:
     async def unmute_user(self, user_id: int):
         self.non_ignore_user.append(user_id)
         self.non_ignore_user = list(set(self.non_ignore_user))
-        await self.update_user(user_id, 'muted', 'N')
+        await self.update_user(user_id, 'muted', False)
 
     async def mute_user(self, user_id: int) -> None:
         self.non_ignore_user.remove(user_id)
-        await self.update_user(user_id, 'muted', 'Y')
+        await self.update_user(user_id, 'muted', True)
 
     def check(self, user_id: int) -> bool:
         return self.check_ex(user_id) and not self.check_muted(user_id)
@@ -463,48 +462,23 @@ class _AuthSystem:
         return self.check_ex(user_id) or user_id in self.whitelist
 
     async def mute_or_unmute(self, r: str, chat_id: int) -> None:
-        if not self.check_ex(chat_id): return
+        if not self.check_ex(chat_id):
+            return
         try:
             await (self.mute_user if r == 'off' else self.unmute_user)(chat_id)
         except ValueError:
             pass
 
-
-class AuthSystem(_AuthSystem):
-    class_self = None
-
     @staticmethod
-    def get_instance():
+    def get_instance() -> 'AuthSystem':
         if AuthSystem.class_self is None:
             raise RuntimeError('Instance not initialize')
         return AuthSystem.class_self
 
     @staticmethod
-    async def initialize_instance(conn: MySQLdb, owner: int = None) -> 'AuthSystem':
+    async def initialize_instance(conn: PgSQLdb, owner: int = None) -> 'AuthSystem':
         AuthSystem.class_self = await AuthSystem.create(conn, owner)
         return AuthSystem.class_self
-
-    @classmethod
-    async def create(cls, conn: MySQLdb, owner: Optional[int] = None) -> 'AuthSystem':
-        self = AuthSystem(conn)
-        await self.init(owner)
-        return self
-
-    @staticmethod
-    async def config2mysqldb(config: ConfigParser, conn: MySQLdb) -> None:
-        await conn.execute("TRUNCATE TABLE `auth_user`")
-        authed_user = ast.literal_eval(config['fuduji']['auth_user'])
-        ignore_user = ast.literal_eval(config['fuduji']['ignore_user'])
-        whitelist = ast.literal_eval(config['fuduji']['whitelist']) if config.has_option('fuduji', 'whitelist') else []
-        await conn.execute("INSERT INTO `auth_user` (`id`, `authorized`) VALUES (%s, 'Y')", ((x,) for x in authed_user),
-                           True)
-        for x in ignore_user:
-            await conn.execute("UPDATE `auth_user` SET `muted` = 'Y' WHERE `id` = %s", x)
-        for x in whitelist:
-            if await conn.query1("SELECT * FROM `auth_user` WHERE `id` = %s", x) is not None:
-                await conn.execute("UPDATE `auth_user` SET `whitelist` = 'Y' WHERE `id` = %s", x)
-            else:
-                await conn.execute("INSERT INTO `auth_user` (`id`, `whitelist`) VALUE (%s, 'Y')", x)
 
 
 def get_language() -> str:

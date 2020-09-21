@@ -9,7 +9,7 @@ The bot forwards your messages to another group.
 * Reply function available.
 * Anonymity: Protect the identity of the user.
 * Authorised users in this group can manage the target group function, such as `/ban`, `/del`, `/grant`, `/kick`, etc.
-* Use MySQL engine to mark the time, message ID and user ID.
+* Use PostgreSQL engine to mark the time, message ID and user ID.
 * When the bot is mentioned in the target group, the user ID specified in the config file will also be mentioned in this group.
 * Once promoted to admin, the bot can add new admins. 
 * Full support for dynamic invitation links. 
@@ -21,10 +21,9 @@ Python 3.7 and above is required
 
 The following libraries are required:
 
-- pyrogram.async (==0.17.0)
-- aiomysql
+- pyrogram.asyncio (~=1.0.x)
+- asyncpg
 - aioredis
-- aiofile
 
 ## Configure
 
@@ -38,7 +37,7 @@ The following libraries are required:
 * Parse the another group id in `config.ini`.
 * If you use your own account, parse your id in `owner` field.
 * Replace `replace_to_id` field with the user ID that the bot will be replaced with. 
-* Import the preset database file into MySQL database
+* Import the preset database file into PostgreSQL database
 
 ### Additional settings for the ticket system
 * Parse the bot's token in the `custom_api_key` field of the configuration file. 

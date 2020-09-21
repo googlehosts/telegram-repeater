@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # customservice.py
 # Copyright (C) 2019-2020 github.com/googlehosts Group:Z
@@ -17,6 +18,7 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
+import asyncio
 import base64
 import gettext
 import hashlib
@@ -28,17 +30,19 @@ import traceback
 from configparser import ConfigParser
 from datetime import datetime
 from typing import (Awaitable, Callable, Dict, List, Mapping, Optional,
-                    Sequence, Tuple, Union)
+                    Sequence, Tuple, TypeVar, Union)
 
+import aioredis
+import asyncpg
+import pyrogram
 import pyrogram.errors
-import redis
-from pyrogram import (CallbackQuery, CallbackQueryHandler, Client, Filters,
-                      InlineKeyboardButton, InlineKeyboardMarkup,
-                      KeyboardButton, Message, MessageHandler,
-                      ReplyKeyboardMarkup, ReplyKeyboardRemove)
+from pyrogram import Client, filters
+from pyrogram.handlers import CallbackQueryHandler, MessageHandler
+from pyrogram.types import (CallbackQuery, InlineKeyboardButton,
+                            InlineKeyboardMarkup, KeyboardButton, Message,
+                            ReplyKeyboardMarkup, ReplyKeyboardRemove)
 
 import utils
-from utils import _anyT, _kT, _rT
 
 logger = logging.getLogger('customservice')
 
@@ -46,6 +50,9 @@ translation = gettext.translation('customservice', 'translations/',
                                   languages=[utils.get_language()], fallback=True)
 
 _T = translation.gettext
+
+_problemT = TypeVar('_problemT', Dict, str, bool, int)
+_anyT = TypeVar('_anyT')
 
 
 class TextParser(utils.TextParser):
@@ -65,13 +72,13 @@ class Ticket:
         self.section = section
         self.status = status
         self.sql = (
-        "INSERT INTO `tickets` (`user_id`, `hash`, `timestamp`, `origin_msg`, `section`, `status`) VALUES (%s, %s, CURRENT_TIMESTAMP(), %s, %s, %s)",
-        (
+            '''INSERT INTO "tickets" ("user_id", "hash", "timestamp", "origin_msg", "section", "status") 
+            VALUES ($1, $2, CURRENT_TIMESTAMP, $3, $4, $5)''',
             msg.chat.id, self.hash_value, base64.b64encode(self._origin_msg.encode()).decode(), self.section,
             self.status
-        ))
+        )
 
-    def __str__(self) -> Tuple[str, Tuple[_anyT, ...]]:
+    def __str__(self) -> Tuple[str, int, str, str, str, str]:
         return self.sql
 
 
@@ -89,9 +96,9 @@ class RemovePunctuations:
 class ProblemSet:
     _self = None
 
-    def __init__(self, redis_conn: redis.Redis, problem_set: Mapping[str, _anyT],
+    def __init__(self, redis_conn: aioredis.Redis, problem_set: Mapping[str, _anyT],
                  remove_punctuations: RemovePunctuations):
-        self._redis: redis.Redis = redis_conn
+        self._redis: aioredis.Redis = redis_conn
         self._prefix: str = utils.get_random_string()
         self.problem_length: int = len(problem_set['problems']['problem_set'])
         self.sample_problem: Dict[str, str] = problem_set['problems'].get('sample_problem')
@@ -110,7 +117,7 @@ class ProblemSet:
             await self._redis.set(f'{self._prefix}_OA_{x}', problems[x]['A'])
 
     @classmethod
-    async def create(cls, redis_conn: redis.Redis, problem_set: Dict[str, _anyT],
+    async def create(cls, redis_conn: aioredis.Redis, problem_set: Dict[str, _anyT],
                      remove_punctuations: RemovePunctuations) -> 'ProblemSet':
         self = ProblemSet(redis_conn, problem_set, remove_punctuations)
         await self.init(problem_set)
@@ -158,7 +165,7 @@ class ProblemSet:
         return ProblemSet._self
 
     @staticmethod
-    async def init_instance(redis_conn: redis.Redis, problem_set: dict,
+    async def init_instance(redis_conn: aioredis.Redis, problem_set: Dict[str, _problemT],
                             remove_punctuations: RemovePunctuations) -> 'ProblemSet':
         ProblemSet._self = await ProblemSet.create(redis_conn, problem_set, remove_punctuations)
         return ProblemSet._self
@@ -166,26 +173,26 @@ class ProblemSet:
 
 class JoinGroupVerify:
 
-    def __init__(self, conn: utils.MySQLdb, botapp: Client, target_group: int, working_group: int):
-        self.conn: utils.MySQLdb = conn
+    def __init__(self, conn: utils.PgSQLdb, botapp: Client, target_group: int, working_group: int):
+        self.conn: utils.PgSQLdb = conn
         self.botapp: Client = botapp
         self.target_group: int = target_group
         self.working_group: int = working_group
-        self._revoke_tracker_coro: Optional[utils.InviteLinkTracker] = None
+        self._revoke_tracker_coro: utils.InviteLinkTracker = None  # type: ignore
         self._keyboard: Dict[str, InlineKeyboardMarkup] = {}
-        self._welcome_msg: Optional[str] = None
+        self._welcome_msg: Optional[str] = None  # type: ignore
         self.remove_punctuations: Optional[RemovePunctuations] = None
         self.problems: Optional[ProblemSet] = None
-        self.max_retry: Optional[int] = None
-        self.max_retry_error: Optional[str] = None
-        self.max_retry_error_detail: Optional[str] = None
-        self.try_again: Optional[str] = None
-        self._send_link_confirm: Optional[bool] = None
-        self._confirm_message: Optional[str] = None
-        self._confirm_button_text: Optional[str] = None
+        self.max_retry: Optional[int] = None  # type: ignore
+        self.max_retry_error: Optional[str] = None  # type: ignore
+        self.max_retry_error_detail: Optional[str] = None  # type: ignore
+        self.try_again: Optional[str] = None  # type: ignore
+        self._send_link_confirm: Optional[bool] = None  # type: ignore
+        self._confirm_message: Optional[str] = None  # type: ignore
+        self._confirm_button_text: Optional[str] = None  # type: ignore
 
     def init(self) -> None:
-        self.botapp.add_handler(MessageHandler(self.handle_bot_private, Filters.private & Filters.text))
+        self.botapp.add_handler(MessageHandler(self.handle_bot_private, filters.private & filters.text))
 
     def init_other_object(self, problem_set: Dict[str, _anyT]):
         self._revoke_tracker_coro: utils.InviteLinkTracker = utils.InviteLinkTracker(
@@ -198,7 +205,8 @@ class JoinGroupVerify:
         self.max_retry_error: str = problem_set['messages']['max_retry_error']
         self.max_retry_error_detail: str = problem_set['messages']['max_retry_error_detail']
         self.try_again: str = problem_set['messages']['try_again']
-        self._send_link_confirm: bool = problem_set.get('confirm_msg') and problem_set['confirm_msg'].get('enable')
+        self._send_link_confirm: bool = problem_set.get('confirm_msg') and problem_set['confirm_msg'].get(
+            'enable')  # type: ignore
         if self._send_link_confirm:
             self._confirm_message: str = problem_set['confirm_msg']['text']
             self._confirm_button_text: str = problem_set['confirm_msg']['button_text']
@@ -213,10 +221,10 @@ class JoinGroupVerify:
         self._revoke_tracker_coro.start()
 
     @classmethod
-    async def create(cls, conn: utils.MySQLdb, botapp: Client, target_group: int, working_group: int,
-                     load_problem_set: Awaitable[Callable[[], Mapping[str, _rT]]], redis_conn: redis.Redis):
+    async def create(cls, conn: utils.PgSQLdb, botapp: Client, target_group: int, working_group: int,
+                     load_problem_set: Callable[[], Dict[str, _problemT]], redis_conn: aioredis.Redis):
         self = JoinGroupVerify(conn, botapp, target_group, working_group)
-        problem_set = await load_problem_set()
+        problem_set = load_problem_set()
         self.remove_punctuations = RemovePunctuations(
             **problem_set['configs'].get('ignore_punctuations', {'enable': False, 'items': []}))
         self.problems = await ProblemSet.init_instance(redis_conn, problem_set, self.remove_punctuations)
@@ -234,21 +242,15 @@ class JoinGroupVerify:
         return self._revoke_tracker_coro
 
     async def query_user_passed(self, user_id: int) -> bool:
-        sqlObj = await self.conn.query1("SELECT `passed`, `bypass` FROM `exam_user_session` WHERE `user_id` = %s",
+        sqlObj = await self.conn.query1('''SELECT "passed", "bypass" FROM "exam_user_session" WHERE "user_id" = $1''',
                                         user_id)
         return sqlObj is not None and (sqlObj['passed'] or sqlObj['bypass'])
 
-    async def query_user_in_origin_group(self, user_id: int) -> bool:
-        userOriginObj = await self.conn.query1("SELECT * FROM `ingroup` WHERE `user_id` = %s", user_id)
-        return userOriginObj is not None
-
     async def handle_bot_private(self, client: Client, msg: Message) -> None:
         if msg.text.startswith('/') and msg.text != '/start newbie': return
-        if await self.query_user_in_origin_group(msg.chat.id):
-            await self._revoke_tracker_coro.send_link(msg.chat.id, True)
-            return
         userObj = await self.conn.query1(
-            "SELECT `problem_id`, `baned`, `bypass`, `retries`, `passed`, `unlimited` FROM `exam_user_session` WHERE `user_id` = %s",
+            '''SELECT "problem_id", "baned", "bypass", "retries", "passed", "unlimited" 
+            FROM "exam_user_session" WHERE "user_id" = $1''',
             msg.chat.id)
         if msg.text == '/start newbie':
             try:
@@ -261,7 +263,7 @@ class JoinGroupVerify:
                 except pyrogram.errors.exceptions.bad_request_400.UserNotParticipant:
                     pass
                 except:
-                    traceback.print_exc()
+                    logger.exception('Exception occurred while checking user status')
                 if userObj is not None:
                     if userObj['bypass']:
                         await self._revoke_tracker_coro.send_link(msg.chat.id, True)
@@ -274,8 +276,9 @@ class JoinGroupVerify:
                 else:
                     randomid = self.problems.get_random_number()
                     await self.conn.execute(
-                        "INSERT INTO `exam_user_session` (`user_id`, `problem_id`, `timestamp`) VALUES (%s, %s, CURRENT_TIMESTAMP())",
-                        (msg.chat.id, randomid))
+                        '''INSERT INTO "exam_user_session" ("user_id", "problem_id", "timestamp")
+                        VALUES ($1, $2, CURRENT_TIMESTAMP)''',
+                        msg.chat.id, randomid)
                     await msg.reply(
                         self._welcome_msg,
                         parse_mode='html',
@@ -299,20 +302,21 @@ class JoinGroupVerify:
                 logger.warning('Caught blocked user %s', msg.chat.id)
                 await client.send_message(
                     self.working_group,
-                    _T('The bot is blocked by user {}').format(TextParser.parse_user(msg.chat.id)),
+                    _T('The bot is blocked by user {}').format(TextParser.parse_user_markdown(msg.chat.id)),
                     'markdown'
                 )
             except:
-                traceback.print_exc()
+                logger.exception('Exception occurred in check newbie function')
         else:
+            # if msg.chat.id in user_session:
             if userObj is not None:
                 if (userObj['unlimited'] or userObj['retries'] <= self.max_retry) and \
                         self.valid_answer(msg, await self.problems.get(userObj['problem_id'])):
-                    await self.conn.execute("UPDATE `exam_user_session` SET `passed` = 1 WHERE `user_id` = %s",
+                    await self.conn.execute('''UPDATE "exam_user_session" SET "passed" = true WHERE "user_id" = $1''',
                                             msg.chat.id)
                     await self.send_link(msg)
                 elif userObj['bypass']:
-                    await self.conn.execute("UPDATE `exam_user_session` SET `passed` = 1 WHERE `user_id` = %s",
+                    await self.conn.execute('''UPDATE "exam_user_session" SET "passed" = true WHERE "user_id" = $1''',
                                             msg.chat.id)
                     await self.send_link(msg)
                 else:
@@ -333,21 +337,36 @@ class JoinGroupVerify:
                         await msg.reply(self.try_again, parse_mode='html', disable_web_page_preview=True)
                         logger.debug('%d %s', msg.chat.id, repr(msg.text))
                         await self._insert_answer_history(msg)
-                    await self.conn.execute("UPDATE `exam_user_session` SET `retries` = %s WHERE `user_id` = %s",
-                                            (retries, msg.chat.id))
+                    await self.conn.execute('''UPDATE "exam_user_session" SET "retries" = $1 WHERE "user_id" = $2''',
+                                            retries, msg.chat.id)
 
     async def _insert_answer_history(self, msg: Message) -> None:
-        await self.conn.execute("INSERT INTO `answer_history` (`user_id`, `body`) VALUE (%s, %s)",
-                                (msg.chat.id, msg.text[:200]))
+        await self.conn.execute('''INSERT INTO "answer_history" ("user_id", "body") VALUES ($1, $2)''',
+                                msg.chat.id, msg.text[:200])
+
+    async def check_joined_group(self, user_id: int) -> None:
+        logger.debug('Track %d status', user_id)
+        await asyncio.sleep(30)  # Wait up to 30 second
+        try:
+            await self.botapp.get_chat_member(self.target_group, user_id)
+        except pyrogram.errors.exceptions.bad_request_400.UserNotParticipant:
+            await self.conn.insert_user_to_banlist(user_id)
+            await self.botapp.send_message(self.working_group, 'Baned not joined group user {}'.format(
+                TextParser.parse_user_markdown(user_id)), 'markdown')
+            logger.info('Baned not joined group user %d', user_id)
 
     async def click_to_join(self, client: Client, msg: CallbackQuery) -> bool:
         if msg.data == 'iamready':
-            try:
-                await client.edit_message_reply_markup(msg.message.chat.id, msg.message.message_id)
-                await self._revoke_tracker_coro.send_link(msg.message.chat.id, True)
-                await msg.answer()
-            except:
-                traceback.print_exc()
+            if not await self.query_user_passed(msg.message.chat.id):
+                await msg.answer(_T('Function is not ready, please try again later.'), True)
+                logger.warning('User clicked but function is not ready during request link')
+            else:
+                try:
+                    await client.edit_message_reply_markup(msg.message.chat.id, msg.message.message_id)
+                    await self._revoke_tracker_coro.send_link(msg.message.chat.id, True)
+                    await msg.answer()
+                except:
+                    logger.exception('Exception occurred on process click function')
             return True
         return False
 
@@ -372,7 +391,7 @@ class JoinGroupVerify:
         b = False
         text = self.remove_punctuations.replace(msg.text)
         if problem_body.get('use_regular_expression', False):
-            b = re.match(problem_body['A'], text)
+            b = bool(re.match(problem_body['A'], text))
         else:
             b = text == problem_body['A']
         logger.debug('verify %s %s == %s', b, text, problem_body['A'])
@@ -386,8 +405,8 @@ class CustomServiceBot:
     SEND_FINISH = 3
     RE_TICKET_ID = re.compile(r'[a-f\d]{32}')
 
-    def __init__(self, config_file: Union[str, ConfigParser], mysql_handle: Optional[utils.MySQLdb],
-                 send_link_callback: Optional[Awaitable[Callable[[Message, int], None]]], redis_conn: redis.Redis):
+    def __init__(self, config_file: Union[str, ConfigParser], pgsql_handle: Optional[utils.PgSQLdb],
+                 send_link_callback: Optional[Callable[[Message, bool], Awaitable]], redis_conn: aioredis.Redis):
 
         if isinstance(config_file, ConfigParser):
             config = config_file
@@ -395,10 +414,13 @@ class CustomServiceBot:
             config = ConfigParser()
             config.read(config_file)
 
-        self.mysqldb: utils.MySQLdb = mysql_handle if mysql_handle else utils.MySQLdb('localhost', 'root',
-                                                                                      config['database']['passwd'],
-                                                                                      config['database']['db_name'])
-        self._redis: redis.Redis = redis_conn
+        # FIXME: should create PgSQL object in async function
+        self.pgsqldb: utils.PgSQLdb = pgsql_handle if pgsql_handle else utils.PgSQLdb(config['pgsql']['host'],
+                                                                                      config.getint('pgsql', 'port'),
+                                                                                      config['pgsql']['user'],
+                                                                                      config['pgsql']['passwd'],
+                                                                                      config['pgsql']['database'])
+        self._redis: aioredis.Redis = redis_conn
         self.bot_id: int = int(config['custom_service']['custom_api_key'].split(':')[0])
         self.bot: Client = Client(
             session_name=str(self.bot_id),
@@ -408,7 +430,7 @@ class CustomServiceBot:
         )
 
         self.help_group: int = config.getint('custom_service', 'help_group')
-        self.send_link_callback: Optional[Awaitable[Callable[[Message, int], None]]] = send_link_callback
+        self.send_link_callback: Optional[Callable[[Message, bool], Awaitable]] = send_link_callback
 
         self.SECTION: List[str] = [
             _T("VERIFICATION"),
@@ -417,19 +439,20 @@ class CustomServiceBot:
 
         self.init_handle()
 
-
     def init_handle(self) -> None:
-        self.bot.add_handler(MessageHandler(self.handle_start, Filters.command('start') & Filters.private))
-        self.bot.add_handler(MessageHandler(self.handle_create, Filters.command('create', ) & Filters.private))
-        self.bot.add_handler(MessageHandler(self.handle_cancel, Filters.command('cancel') & Filters.private))
-        self.bot.add_handler(MessageHandler(self.handle_list, Filters.command('list') & Filters.private))
-        self.bot.add_handler(MessageHandler(self.handle_close, Filters.command('close') & Filters.private))
-        self.bot.add_handler(MessageHandler(self.handle_reply, Filters.reply & Filters.text & Filters.private))
-        self.bot.add_handler(MessageHandler(self.handle_msg, Filters.text & Filters.private))
+        self.bot.add_handler(MessageHandler(self.handle_start, filters.command('start') & filters.private))
+        self.bot.add_handler(MessageHandler(self.handle_create, filters.command('create') & filters.private))
+        self.bot.add_handler(MessageHandler(self.handle_cancel, filters.command('cancel') & filters.private))
+        self.bot.add_handler(MessageHandler(self.handle_list, filters.command('list') & filters.private))
+        self.bot.add_handler(MessageHandler(self.handle_close, filters.command('close') & filters.private))
+        self.bot.add_handler(MessageHandler(self.handle_reply, filters.reply & filters.text & filters.private))
+        self.bot.add_handler(MessageHandler(self.handle_msg, filters.text & filters.private))
+        self.bot.add_handler(MessageHandler(self.query_user_status,
+                                            filters.chat(self.help_group) & filters.command('q')))
         self.bot.add_handler(MessageHandler(self.call_superuser_function,
-                                            Filters.chat(self.help_group) & Filters.reply & Filters.command('m')))
-        self.bot.add_handler(MessageHandler(self.handle_group, Filters.reply & Filters.chat(self.help_group)))
-        self.bot.add_handler(MessageHandler(self.handle_other, Filters.private))
+                                            filters.chat(self.help_group) & filters.reply & filters.command('m')))
+        self.bot.add_handler(MessageHandler(self.handle_group, filters.reply & filters.chat(self.help_group)))
+        self.bot.add_handler(MessageHandler(self.handle_other, filters.private))
         self.bot.add_handler(CallbackQueryHandler(self.answer))
 
     async def start(self) -> Client:
@@ -438,8 +461,9 @@ class CustomServiceBot:
     async def stop(self) -> Client:
         return await self.bot.stop()
 
-    async def idle(self) -> Client:
-        return await self.bot.idle()
+    @staticmethod
+    async def idle() -> None:
+        await pyrogram.idle()
 
     async def active(self) -> None:
         await self.start()
@@ -468,8 +492,8 @@ class CustomServiceBot:
         ], resize_keyboard=True, one_time_keyboard=True)
 
     @staticmethod
-    def generate_ticket_keyboard(ticket_id: str, user_id: int, closed: bool=False,
-                                 other: bool=False) -> InlineKeyboardMarkup:
+    def generate_ticket_keyboard(ticket_id: str, user_id: int, closed: bool = False,
+                                 other: bool = False) -> InlineKeyboardMarkup:
         kb = [
             InlineKeyboardButton(text=_T('Close'), callback_data=f'close {ticket_id}'),
             InlineKeyboardButton(text=_T('Send link'), callback_data=f'send {user_id}'),
@@ -488,14 +512,14 @@ class CustomServiceBot:
         return '\u2705' if i else '\u274c'
 
     async def handle_list(self, _client: Client, msg: Message) -> None:
-        q = await self.mysqldb.query(
-            "SELECT `hash`, `status` FROM `tickets` WHERE `user_id` = %s ORDER BY `timestamp` DESC LIMIT 3",
-            msg.chat.id)
+        q = [dict(x) for x in (await self.pgsqldb.query(
+            '''SELECT "hash", "status" FROM "tickets" WHERE "user_id" = $1 ORDER BY "timestamp" DESC LIMIT 3''',
+            msg.chat.id))]
         if not q:
             await msg.reply(_T('You have never used this system before.'), True)
             return
         for _ticket in q:
-            _ticket['status'] = self.return_bool_emoji(_ticket['status'] != 'closed')
+            _ticket['status'] = self.return_bool_emoji(_ticket['status'] != 'closed')  # type: ignore
         await msg.reply(_T('Here are the last three tickets (up to 3)\n#{}').format(
             '\n#'.join(' '.join(value for _, value in _ticket.items()) for _ticket in q)), True)
 
@@ -506,22 +530,21 @@ class CustomServiceBot:
             except ValueError:
                 await msg.reply(_T(
                     'TICKET NUMBER NOT FOUND\n'
-                    'Please make sure that you have replied '
-                    'to the message which contains the ticket number.'),
-                                       True)
+                    'Please make sure that you have replied to the message which contains the ticket number.'),
+                    True)
                 return
         else:
             if len(msg.text) < 8:
                 await msg.reply(_T(
-                    'ERROR: COMMAND FORMAT Please use `/close <ticket number>` or '
-                    '**Reply to the message which contains the ticket number** to close the ticket'),
-                                       True, 'markdown', True)
+                    'ERROR: COMMAND FORMAT Please use `/close <ticket number>` or'
+                    ' **Reply to the message which contains the ticket number** to close the ticket'),
+                    True, 'markdown', True)
                 return
             ticket_id = msg.text.split()[-1]
             if len(ticket_id) != 32:
                 await msg.reply(_T('ERROR: TICKET NUMBER FORMAT'), True)
                 return
-        q = await self.mysqldb.query1("SELECT `user_id` FROM `tickets` WHERE `hash` = %s AND `status` != 'closed'",
+        q = await self.pgsqldb.query1('''SELECT "user_id" FROM "tickets" WHERE "hash" = $1 AND "status" != 'closed' ''',
                                       ticket_id)
         if q is None:
             await msg.reply(_T('TICKET NUMBER NOT FOUND or TICKET CLOSED'), True)
@@ -530,48 +553,50 @@ class CustomServiceBot:
             await msg.reply(_T(
                 '403 Forbidden(You cannot close a ticket created by others. '
                 'If this ticket is indeed created by yourself, please report the problem using the same ticket.)'),
-                                   True)
+                True)
             return
-        await self.mysqldb.execute("UPDATE `tickets` SET `status` = 'closed' WHERE `user_id` = %s AND `hash` = %s",
-                                   (msg.chat.id, ticket_id))
+        await self.pgsqldb.execute('''UPDATE "tickets" SET "status" = 'closed' WHERE "user_id" = $1 AND "hash" = $2''',
+                                   msg.chat.id, ticket_id)
         await self._update_last_time(msg)
         await client.send_message(self.help_group,
                                   _T('UPDATE\n[ #{} ]\nThis ticket is already closed by {}').format(
                                       ticket_id,
-                                      utils.TextParser.parse_user(msg.chat.id, _T('Creater'))),
+                                      utils.TextParser.parse_user_markdown(msg.chat.id, _T('Creater'))),
                                   reply_markup=self.generate_ticket_keyboard(ticket_id, msg.chat.id, other=True))
         await msg.reply(_T('Close ticket success.'), True)
 
-    async def add_user(self, user_id: int, step: int=0) -> None:
-        await self.mysqldb.execute(
-            "INSERT INTO `tickets_user` (`user_id`, `create_time`, `step`) VALUES (%s, CURRENT_TIMESTAMP(), %s)",
-            (user_id, step))
+    async def add_user(self, user_id: int, step: int = 0) -> None:
+        await self.pgsqldb.execute(
+            '''INSERT INTO "tickets_user" ("user_id", "create_time", "step") VALUES ($1, CURRENT_TIMESTAMP, $2)''',
+            user_id, step)
 
     async def change_step(self, user_id: int, step: int, section: str = '') -> None:
         if section == '':
-            await self.mysqldb.execute("UPDATE `tickets_user` SET `step` = %s WHERE `user_id` = %s", (step, user_id))
+            await self.pgsqldb.execute('''UPDATE "tickets_user" SET "step" = $1 WHERE "user_id" = $2''', step, user_id)
         else:
-            await self.mysqldb.execute("UPDATE `tickets_user` SET `step` = %s, `section` = %s WHERE `user_id` = %s",
-                                       (step, section, user_id))
+            await self.pgsqldb.execute('''UPDATE "tickets_user" SET "step" = $1, "section" = $2 WHERE "user_id" = $3''',
+                                       step, section, user_id)
 
+    async def query_status(self, user_id: int) -> Optional[asyncpg.Record]:
+        return await self.pgsqldb.query1('''SELECT "step", "section" FROM "tickets_user" WHERE "user_id" = $1''',
+                                         user_id)
 
-    async def query_status(self, user_id: int) -> Optional[Mapping[_kT, _rT]]:
-        return await self.mysqldb.query1("SELECT `step`, `section` FROM `tickets_user` WHERE `user_id` = %s", user_id)
-
-    async def query_user(self, user_id: int) -> Optional[Mapping[_anyT, _anyT]]:
-        return await self.mysqldb.query1("SELECT `section` FROM `tickets_user` WHERE `user_id` = %s", user_id)
+    async def query_user(self, user_id: int) -> Optional[asyncpg.Record]:
+        return await self.pgsqldb.query1('''SELECT "section" FROM "tickets_user" WHERE "user_id" = $1''', user_id)
 
     async def set_section(self, user_id: int, section: str) -> None:
-        await self.mysqldb.execute("UPDATE `tickets_user` SET `section` = %s WHERE `user_id` = %s", (section, user_id))
+        await self.pgsqldb.execute('''UPDATE "tickets_user" SET "section" = $1 WHERE "user_id" = $2''', section,
+                                   user_id)
 
-
-    async def query_user_exam_status(self, user_id: int) -> Optional[Mapping[_anyT, _anyT]]:
-        return await self.mysqldb.query1(
-            "SELECT `problem_id`, `baned`, `bypass`, `passed`, `unlimited`, `retries` FROM `exam_user_session` WHERE `user_id` = %s",
+    async def query_user_exam_status(self, user_id: int) -> Optional[asyncpg.Record]:
+        return await self.pgsqldb.query1(
+            '''SELECT "problem_id", "baned", "bypass", "passed", "unlimited", "retries"
+             FROM "exam_user_session" WHERE "user_id" = $1''',
             user_id)
 
     async def handle_start(self, _client: Client, msg: Message) -> None:
-        q = await self.mysqldb.query1("SELECT `last_msg_sent` FROM `tickets_user` WHERE `user_id` = %s", msg.chat.id)
+        q = await self.pgsqldb.query1('''SELECT "last_msg_sent" FROM "tickets_user" WHERE "user_id" = $1''',
+                                      msg.chat.id)
         await msg.reply(_T(
             'Welcome to Google Hosts Telegram Ticket System\n\n'
             'ATTENTION:PLEASE DO NOT ABUSE THIS SYSTEM. Otherwise there is a possibility of getting blocked.\n\n'
@@ -579,26 +604,28 @@ class CustomServiceBot:
             '/list - to list recent tickets\n'
             '/close - to close the ticket\n'
             '/cancel - to reset'),
-                        True)
+            True)
         if q is None:
             await self.add_user(msg.chat.id)
 
     async def handle_create(self, client: Client, msg: Message) -> None:
         if await self.flood_check(client, msg):
             return
-        q = await self.mysqldb.query1("SELECT `hash` FROM `tickets` WHERE `user_id` = %s AND `status` = 'open' LIMIT 1",
-                                      msg.chat.id)
+        q = await self.pgsqldb.query1(
+            '''SELECT "hash" FROM "tickets" WHERE "user_id" = $1 AND "status" = 'open' LIMIT 1''',
+            msg.chat.id)
         if q:
             await msg.reply(_T('UNABLE TO CREATE A NEW TICKET: An existing ticket is currently open.'), True)
             return
-        sqlObj = await self.mysqldb.query1("SELECT `user_id` FROM `tickets_user` WHERE `user_id` = %s", msg.chat.id)
-        await (self.add_user if sqlObj is None else self.change_step)(msg.chat.id, CustomServiceBot.SELECT_SECTION)
+        sql_obj = await self.pgsqldb.query1('''SELECT "user_id" FROM "tickets_user" WHERE "user_id" = $1''',
+                                            msg.chat.id)
+        await (self.add_user if sql_obj is None else self.change_step)(msg.chat.id, CustomServiceBot.SELECT_SECTION)
         await msg.reply(_T('You are creating a new ticket.\n\nPlease choose the correct department.'), True,
                         reply_markup=self.generate_section_pad())
 
     async def handle_cancel(self, _client: Client, msg: Message) -> None:
         await self.change_step(msg.chat.id, CustomServiceBot.INIT_STATUS)
-        await msg.reply(_T("Reset Successful"), reply_markup=ReplyKeyboardRemove())
+        await msg.reply(_T('Reset Successful'), reply_markup=ReplyKeyboardRemove())
 
     async def handle_reply(self, client: Client, msg: Message) -> None:
         if await self.flood_check(client, msg):
@@ -607,10 +634,11 @@ class CustomServiceBot:
             ticket_hash = self.get_hash_from_reply_msg(msg)
         except ValueError:
             return
-        sqlObj = await self.mysqldb.query1(
-            "SELECT `status`, `section` FROM `tickets` WHERE `hash` = %s AND `user_id` = %s",
-            (ticket_hash, msg.chat.id))
-        if sqlObj is None or sqlObj['status'] == 'closed':
+        # print(self.get_hash_from_reply_msg(msg))
+        sql_obj = await self.pgsqldb.query1(
+            '''SELECT "status", "section" FROM "tickets" WHERE "hash" = $1 AND "user_id" = $2''',
+            ticket_hash, msg.chat.id)
+        if sql_obj is None or sql_obj['status'] == 'closed':
             await msg.reply(_T('TICKET NUMBER NOT FOUND or TICKET CLOSED. REPLY FUNCTION NO LONGER AVAILABLE.'), True)
             return
         await self._update_last_time(msg)
@@ -618,35 +646,36 @@ class CustomServiceBot:
             self.help_group,
             _T("\'NEW REPLY\n[ #{} ]:\nMESSAGE: {}").format(ticket_hash, TextParser(msg).parsed_msg),
             'html',
-            reply_markup=self.generate_ticket_keyboard(ticket_hash, msg.chat.id, sqlObj['section'] != self.SECTION[0])
+            reply_markup=self.generate_ticket_keyboard(ticket_hash, msg.chat.id, sql_obj['section'] != self.SECTION[0])
         )
         await msg.reply(_T('The new reply is added successfully!'))
 
     async def handle_msg(self, client: Client, msg: Message) -> None:
-        sqlObj = await self.query_status(msg.chat.id)
-        if sqlObj is None or sqlObj['step'] not in (CustomServiceBot.SELECT_SECTION, CustomServiceBot.SEND_QUESTION):
+        sql_obj = await self.query_status(msg.chat.id)
+        if sql_obj is None or sql_obj['step'] not in (CustomServiceBot.SELECT_SECTION, CustomServiceBot.SEND_QUESTION):
             if await self.flood_check(client, msg):
                 return
             await msg.reply(_T('Please use bot command to interact.'))
             return
-        if sqlObj['step'] == CustomServiceBot.SELECT_SECTION:
+        if sql_obj['step'] == CustomServiceBot.SELECT_SECTION:
             if msg.text in self.SECTION:
                 await self.change_step(msg.chat.id, CustomServiceBot.SEND_QUESTION, msg.text)
                 await msg.reply(_T(
                     'Please describe your problem briefly(up to 500 characters)\n'
                     '(Please use external links to send pictures.):\n\n'
-                    'ATTENTION: Receiving a confirmation message in return indicates that the '
-                    'ticket is created successfully.\n\nUse /cancel to cancel creating the ticket.'),
-                                True, reply_markup=ReplyKeyboardRemove())
+                    'ATTENTION: Receiving a confirmation message in return '
+                    'indicates that the ticket is created successfully.\n\n'
+                    'Use /cancel to cancel creating the ticket.'),
+                    True, reply_markup=ReplyKeyboardRemove())
             else:
                 await msg.reply(_T('Please use the menu below to choose the correct department.'), True)
-        elif sqlObj['step'] == CustomServiceBot.SEND_QUESTION:
+        elif sql_obj['step'] == CustomServiceBot.SEND_QUESTION:
             if len(msg.text) > 500:
                 await msg.reply(_T('The number of characters you have entered is larger than 500. Please re-enter.'),
                                 True)
                 return
             ticket_hash = self.hash_msg(msg)
-            await self.mysqldb.execute(*Ticket(msg, sqlObj['section'], 'open').sql)
+            await self.pgsqldb.execute(*Ticket(msg, sql_obj['section'], 'open').sql)
             await self.change_step(msg.chat.id, CustomServiceBot.INIT_STATUS)
             await msg.reply(
                 _T(
@@ -654,7 +683,7 @@ class CustomServiceBot:
                     'Message: \n{text}\n\nReply to this message to add a new reply to the ticket.').format(
                     ticket_id=ticket_hash,
                     text=TextParser(msg).parsed_msg,
-                    section=sqlObj['section']
+                    section=sql_obj['section']
                 ),
                 parse_mode='html'
             )
@@ -662,18 +691,18 @@ class CustomServiceBot:
                 self.help_group,
                 _T('NEW TICKET\n[ #{} ]\nClick {} to check the user profile\nDepartment: {}\nMessage: \n{}').format(
                     ticket_hash,
-                    TextParser.parse_user_ex(msg.chat.id, _T('Here')),
-                    sqlObj['section'],
+                    TextParser.parse_user_html(msg.chat.id, _T('Here')),
+                    sql_obj['section'],
                     TextParser(msg).parsed_msg
                 ),
                 'html',
                 reply_markup=self.generate_ticket_keyboard(
                     ticket_hash,
                     msg.chat.id,
-                    other=sqlObj['section'] != self.SECTION[0]
+                    other=sql_obj['section'] != self.SECTION[0]
                 )
             )).message_id
-            if sqlObj['section'] == self.SECTION[0]:
+            if sql_obj['section'] == self.SECTION[0]:
                 await client.send_message(
                     self.help_group,
                     await self.generate_user_status(msg.chat.id),
@@ -681,58 +710,61 @@ class CustomServiceBot:
                     reply_to_message_id=msg_id
                 )
         else:
-            logger.error("throw! user_id: %d, sqlObj = %s", msg.chat.id, repr(sqlObj))
+            logger.error("throw! user_id: %d, sql_obj = %s", msg.chat.id, repr(sql_obj))
 
-    async def generate_question_and_answer(self, user_session: Mapping[str, _rT]) -> str:
-        _text = 'Question: <code>{Q}</code>\n{qtype} Answer: <code>{A}</code>'.format(
+    @staticmethod
+    async def generate_question_and_answer(user_session: asyncpg.Record) -> str:
+        _text = 'Question: <code>{Q}</code>\n{question_type} Answer: <code>{A}</code>'.format(
             **await ProblemSet.get_instance().get(user_session['problem_id']),
-            qtype='Except' if ProblemSet.get_instance().remove_punctuations.enable else 'Standard')
+            question_type='Except' if ProblemSet.get_instance().remove_punctuations.enable else 'Standard')
         if ProblemSet.get_instance().remove_punctuations.enable:
-            _text += f'\nStandard Answer: <code>{await ProblemSet.get_instance().get_origin(user_session["problem_id"])}</code>'
+            _text += f'\nStandard Answer: <code>' \
+                     f'{await ProblemSet.get_instance().get_origin(user_session["problem_id"])}</code>'
         return _text
 
     async def __generate_answer_history(self, user_id: int) -> str:
-        sqlObj = await self.mysqldb.query(
-            'SELECT `body`, `timestamp` FROM `answer_history` WHERE `user_id` = %s ORDER BY `_id` DESC LIMIT 3',
+        sql_obj = await self.pgsqldb.query(
+            '''SELECT "body", "timestamp" FROM "answer_history" WHERE "user_id" = $1 ORDER BY "id" DESC LIMIT 3''',
             user_id)
-        if sqlObj is None:
+        if sql_obj is None:
             return 'QUERY ERROR (user_id => %d)' % user_id
         if ProblemSet.get_instance().remove_punctuations.enable:
             return '\n\n'.join('<code>{}</code> <pre>{}</pre>\nOriginal answer: <pre>{}</pre>'.format(
                 x['timestamp'], ProblemSet.get_instance().remove_punctuations.replace(x['body']), x['body']) for x in
-                               sqlObj)
-        return '\n\n'.join('<code>{}</code> <pre>{}</pre>'.format(x['timestamp'], x['body']) for x in sqlObj)
+                               sql_obj)
+        return '\n\n'.join(f'<code>{x["timestamp"]}</code> <pre>{x["body"]}</pre>' for x in sql_obj)
 
     async def _generate_answer_history(self, user_id: int, retries: int) -> str:
-        hsqlObj = await self.mysqldb.query1("SELECT COUNT(*) as `count` FROM `answer_history` WHERE `user_id` = %s",
+        sql_obj = await self.pgsqldb.query1('''SELECT COUNT(*) FROM "answer_history" WHERE "user_id" = $1''',
                                             user_id)
-        if retries > 0 or hsqlObj['count'] > 0:
+        if retries > 0 or sql_obj['count'] > 0:
             return '\n\nAnswer History:\n{}'.format(await self.__generate_answer_history(user_id))
         return ''
 
     async def generate_question_rate(self, user_session: Mapping[str, int]) -> str:
         problem_id = user_session['problem_id']
         total_count = (
-            await self.mysqldb.query1("SELECT COUNT(*) as `count` FROM `exam_user_session` WHERE `problem_id` = %s",
+            await self.pgsqldb.query1('''SELECT COUNT(*) FROM "exam_user_session" WHERE "problem_id" = $1''',
                                       problem_id))['count']
-        correct_count = (await self.mysqldb.query1(
-            "SELECT COUNT(*) as `count` FROM `exam_user_session` WHERE `problem_id` = %s and `passed` = 1",
+        correct_count = (await self.pgsqldb.query1(
+            '''SELECT COUNT(*) FROM "exam_user_session" WHERE "problem_id" = $1 and "passed" = true''',
             problem_id))['count']
         rate = (correct_count / total_count) * 100
         return '\n\nProblem {} correct rate: {:.2f}%'.format(problem_id, rate)
 
     async def generate_user_status(self, user_id: int) -> str:
         user_status = await self.query_user_exam_status(user_id)
-        return 'User {5} status:\nPassed exam: {0}\nBan status: {1}\nBypass: {2}\nUnlimited: {3}\nRetries: {4}\n\n{6}{7}{8}'.format(
+        return ('User {5} status:\nPassed exam: {0}\nBan status: {1}\nBypass: {2}\nUnlimited: {3}\n'
+                'Retries: {4}\n\n{6}{7}{8}').format(
             self.return_bool_emoji(user_status['passed']),
             self.return_bool_emoji(user_status['baned']),
             self.return_bool_emoji(user_status['bypass']),
             self.return_bool_emoji(user_status['unlimited']),
             user_status['retries'],
-            TextParser.parse_user_ex(user_id),
+            TextParser.parse_user_html(user_id),
             await self.generate_question_and_answer(user_status),
             await self.generate_question_rate(user_status),
-            await self._generate_answer_history(user_id, user_status['retries'])
+            await self._generate_answer_history(user_id, user_status['retries'])  # type: ignore
         ) if user_status is not None else '<b>{}</b>'.format(_T('WARNING: THIS USER HAS NEVER USED THE BOT BEFORE.'))
 
     async def handle_other(self, _client: Client, msg: Message) -> None:
@@ -742,42 +774,45 @@ class CustomServiceBot:
         await self._update_last_msg_send(msg)
 
     async def handle_group(self, client: Client, msg: Message) -> None:
-        if msg.reply_to_message.from_user.id != self.bot_id or (msg.text and msg.text.startswith('/')): return
+        if msg.reply_to_message.from_user.id != self.bot_id or (msg.text and msg.text.startswith('/')):
+            return
         try:
             ticket_hash = self.get_hash_from_reply_msg(msg)
         except ValueError:
             return
-        sqlObj = await self.mysqldb.query1("SELECT * FROM `tickets` WHERE `hash` = %s", ticket_hash)
-        if sqlObj is None:
+        sql_obj = await self.pgsqldb.query1('''SELECT * FROM "tickets" WHERE "hash" = $1''', ticket_hash)
+        if sql_obj is None:
             await msg.reply(_T('ERROR: TICKET NOT FOUND'))
             return
-        if sqlObj['status'] == 'closed':
+        if sql_obj['status'] == 'closed':
             await msg.reply(_T('This ticket is already closed.'))
             return
         try:
-            msg_reply = await client.send_message(sqlObj['user_id'],
+            msg_reply = await client.send_message(sql_obj['user_id'],
                                                   _T(
-                                                      'NEW UPDATE!\n[ #{} ]\nMessage: \n{}\n\nReply to this message to add a new reply to the ticket').format(
+                                                      'NEW UPDATE!\n[ #{} ]\nMessage: \n{}\n\n'
+                                                      'Reply to this message to add a new reply to the ticket').format(
                                                       ticket_hash, TextParser(msg).parsed_msg
                                                   ), 'html')
             await msg.reply(_T('REPLY [ #{} ] SUCCESSFUL').format(ticket_hash),
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                 [
                                     InlineKeyboardButton(text=_T('recall'),
-                                                         callback_data=f'del {msg_reply.chat.id} {msg_reply.message_id}')
+                                                         callback_data=f'del '
+                                                                       f'{msg_reply.chat.id} {msg_reply.message_id}')
                                 ]
                             ]))
             r = await self._query_last_time(msg)
             if time.time() - r < 120:
-                await self._redis.delete(f'CSLAST_{sqlObj["user_id"]}')
+                await self._redis.delete(f'CSLAST_{sql_obj["user_id"]}')
         except pyrogram.errors.UserIsBlocked:
             await msg.reply(_T('Replay [ #{} ] fail,user blocked this bot.').format(ticket_hash))
         except pyrogram.errors.RPCError:
-            await msg.reply(_T('Replay [ #{} ] fail, {}\nView console to get more information').format(ticket_hash,
-                                                                                                       traceback.format_exc().splitlines()[
-                                                                                                           -1]))
+            await msg.reply(_T('Replay [ #{} ] fail, {}\n'
+                               'View console to get more information').format(ticket_hash,
+                                                                              traceback.format_exc().splitlines()[
+                                                                                  -1]))
             raise
-
 
     @staticmethod
     def generate_confirm_keyboard(first: str, last: Union[str, Sequence[str]]) -> InlineKeyboardMarkup:
@@ -793,10 +828,11 @@ class CustomServiceBot:
         ])
 
     async def generate_superuser_text(self, user_id: Union[str, int]) -> str:
-        return '\n\n'.join((_T("Please choose the section below"), await self.generate_user_status(user_id),
-                            ' '.join((_T('Last refresh:'), str(datetime.now().replace(microsecond=0))))))
+        return '\n\n'.join(
+            (_T("Please choose the section below"), await self.generate_user_status(user_id),  # type: ignore
+             ' '.join((_T('Last refresh:'), str(datetime.now().replace(microsecond=0))))))
 
-    async def generate_superuser_detail(self, user_id: Union[str, int]) -> Dict[str, _rT]:
+    async def generate_superuser_detail(self, user_id: Union[str, int]) -> Dict[str, _anyT]:
         return {
             'text': await self.generate_superuser_text(user_id),
             'reply_markup': InlineKeyboardMarkup(
@@ -814,33 +850,45 @@ class CustomServiceBot:
                         InlineKeyboardButton(text=_T('RESET USER STATUS'), callback_data=f'renew {user_id}')
                     ],
                     [
+                        InlineKeyboardButton(text='INSERT USER PROFILE', callback_data=f'insert {user_id}')
+                    ],
+                    [
                         InlineKeyboardButton(text=_T('Cancel'), callback_data='cancel')
                     ]
                 ]
             )
         }
 
-    async def call_superuser_function(self, client: Client, msg: Message) -> None:
-        sqlObj = await self.mysqldb.query1("SELECT `user_id`, `section` FROM `tickets` WHERE `hash` = %s",
-                                           self.get_hash_from_reply_msg(msg))
-        if sqlObj['section'] != self.SECTION[0]:
-            await msg.reply(_T("This ticket doesn\'t support admin menus for now."), True)
+    async def query_user_status(self, _client: Client, msg: Message) -> None:
+        if len(msg.command) < 2:
+            await msg.reply('Arguments should contain user_id')
             return
-        user_id = sqlObj['user_id']
-        await client.send_message(
+        await self.get_user_status(int(msg.command[1]), msg.message_id)
+
+    async def get_user_status(self, user_id: int, reply_to_message_id: int) -> None:
+        await self.bot.send_message(
             self.help_group,
             parse_mode='html',
-            reply_to_message_id=msg.reply_to_message.message_id,
+            reply_to_message_id=reply_to_message_id,
             **await self.generate_superuser_detail(user_id)
         )
 
+    async def call_superuser_function(self, _client: Client, msg: Message) -> None:
+        sql_obj = await self.pgsqldb.query1('''SELECT "user_id", "section" FROM "tickets" WHERE "hash" = $1''',
+                                            self.get_hash_from_reply_msg(msg))
+        if sql_obj['section'] != self.SECTION[0]:
+            await msg.reply(_T("This ticket doesn't support admin menus for now."), True)
+            return
+        user_id = sql_obj['user_id']
+        await self.get_user_status(user_id, msg.reply_to_message.message_id)
+
     async def confirm_dialog(self, msg: CallbackQuery, additional_msg: str, callback_prefix: str,
-                             id_: Optional[Union[str, int]]) -> None:
-        await msg.answer()
+                             id_: Union[str]) -> None:
+        asyncio.run_coroutine_threadsafe(msg.answer(), asyncio.get_event_loop())
         if len(id_) < 32:
             await self.bot.send_message(
                 self.help_group,
-                _T('Do you really want to {} {}?').format(additional_msg, TextParser.parse_user(id_)),
+                _T('Do you really want to {} {}?').format(additional_msg, TextParser.parse_user_markdown(id_)),
                 'markdown',
                 reply_markup=self.generate_confirm_keyboard(callback_prefix, id_)
             )
@@ -856,18 +904,18 @@ class CustomServiceBot:
             raise TimeoutError()
         if msg.data.startswith('close'):
             ticket_id = msg.data.split()[-1]
-            q = await self.mysqldb.query1("SELECT `user_id`, `status` FROM `tickets` WHERE `hash` = %s", ticket_id)
+            q = await self.pgsqldb.query1('''SELECT "user_id", "status" FROM "tickets" WHERE "hash" = $1''', ticket_id)
             if q is None:
                 return await msg.answer(_T('TICKET NOT FOUND'), True)
             if q['status'] == 'closed':
                 return await msg.answer(_T('This ticket is already closed.'))
-            await self.mysqldb.execute("UPDATE `tickets` SET `status` = 'closed' WHERE `hash` = %s", ticket_id)
+            await self.pgsqldb.execute('''UPDATE "tickets" SET "status" = 'closed' WHERE "hash" = $1''', ticket_id)
             await msg.answer(_T('This ticket is already closed.'))
             await client.send_message(
                 self.help_group,
                 _T('UPDATE\n[ #{} ]\nThis ticket is closed by {}.').format(
                     ticket_id,
-                    utils.TextParser.parse_user(
+                    utils.TextParser.parse_user_markdown(
                         msg.from_user.id,
                         utils.TextParser.UserName(msg.from_user).full_name
                     )
@@ -877,12 +925,12 @@ class CustomServiceBot:
             )
             await client.send_message(q['user_id'], _T('Your ticket [ #{} ] is closed').format(ticket_id))
         elif msg.data.startswith('block'):
-            await self.mysqldb.execute("UPDATE `tickets_user` SET `baned` = 1 WHERE `user_id` = %s",
-                                       msg.data.split()[-1])
+            await self.pgsqldb.execute('''UPDATE "tickets_user" SET "banned" = true WHERE "user_id" = $1''',
+                                       int(msg.data.split()[-1]))
             await msg.answer(_T('DONE!'))
             await self.bot.send_message(
                 self.help_group,
-                _T('blocked {}').format(TextParser.parse_user(msg.data.split()[-1], msg.data.split()[-1])),
+                _T('blocked {}').format(TextParser.parse_user_markdown(msg.data.split()[-1], msg.data.split()[-1])),
                 parse_mode='markdown',
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=_T('UNBAN'), callback_data='unban {}'.format(msg.data.split()[-1]))]
@@ -897,8 +945,8 @@ class CustomServiceBot:
                 await msg.answer(_T('Failed to send the invitation link. Please check the console.\n{}').format(
                     traceback.format_exc().splitlines()[-1]), True)
         elif msg.data.startswith('reset'):
-            await self.mysqldb.execute('UPDATE `exam_user_session` SET `retries` = 0 WHERE `user_id` = %s',
-                                       msg.data.split()[-1])
+            await self.pgsqldb.execute('''UPDATE "exam_user_session" SET "retries" = 0 WHERE "user_id" = $1''',
+                                       int(msg.data.split()[-1]))
             await msg.answer('Retry times has been reset')
         elif msg.data.startswith('del'):
             try:
@@ -909,32 +957,41 @@ class CustomServiceBot:
                 await msg.answer(_T('Failed to delete the message. Please check the console.\n{}').format(
                     traceback.format_exc().splitlines()[-1]), True)
         elif msg.data.startswith('renew'):
-            await self.mysqldb.execute('DELETE FROM `exam_user_session` WHERE `user_id` = %s', msg.data.split()[-1])
+            await self.pgsqldb.execute('''DELETE FROM "exam_user_session" WHERE "user_id" = $1''',
+                                       int(msg.data.split()[-1]))
             await msg.answer(_T('DONE!'))
         elif msg.data.startswith('bypass'):
-            await self.mysqldb.execute('UPDATE `exam_user_session` SET `bypass` = 1 WHERE `user_id` = %s',
-                                       msg.data.split()[-1])
+            await self.pgsqldb.execute('''UPDATE "exam_user_session" SET "bypass" = true WHERE "user_id" = $1''',
+                                       int(msg.data.split()[-1]))
             await msg.answer(_T('DONE!'))
         elif msg.data.startswith('setpass'):
-            await self.mysqldb.execute('UPDATE `exam_user_session` SET `passed` = 1 WHERE `user_id` = %s',
-                                       msg.data.split()[-1])
+            await self.pgsqldb.execute('''UPDATE "exam_user_session" SET "passed" = true WHERE "user_id" = $1''',
+                                       int(msg.data.split()[-1]))
             await msg.answer(_T('DONE!'))
         elif msg.data.startswith('unlimited'):
-            await self.mysqldb.execute('UPDATE `exam_user_session` SET `unlimited` = 1 WHERE `user_id` = %s',
-                                       msg.data.split()[-1])
+            await self.pgsqldb.execute('''UPDATE "exam_user_session" SET "unlimited" = true WHERE "user_id" = $1''',
+                                       int(msg.data.split()[-1]))
+            await msg.answer(_T('DONE!'))
+        elif msg.data.startswith('insert'):
+            await self.pgsqldb.execute('''INSERT INTO "exam_user_session" ("user_id", "problem_id") VALUES ($1, 2)''',
+                                       int(msg.data.split()[-1]))
             await msg.answer(_T('DONE!'))
         await client.delete_messages(msg.message.chat.id, msg.message.message_id)
 
     async def send_confirm(self, _client: Client, msg: CallbackQuery) -> None:
+
         def make_msg_handle(additional_msg: str, callback_prefix: str):
             async def wrapper():
                 await self.confirm_dialog(msg, additional_msg, callback_prefix, msg.data.split()[-1])
+
             return wrapper
+
         if msg.data.startswith('del'):
             await msg.answer('Please press again to make sure. If you really want to delete this reply', True)
             await self.bot.send_message(
                 self.help_group,
-                'Do you want to delete reply message to {}?'.format(TextParser.parse_user(msg.data.split()[-2])),
+                'Do you want to delete reply message to {}?'.format(
+                    TextParser.parse_user_markdown(msg.data.split()[-2])),
                 'markdown',
                 reply_markup=self.generate_confirm_keyboard('del', msg.data[4:])
             )
@@ -946,7 +1003,8 @@ class CustomServiceBot:
             'bypass': make_msg_handle(_T('set bypass for'), 'bypass'),
             'renew': make_msg_handle(_T('reset user status'), 'renew'),
             'setpass': make_msg_handle(_T('set pass'), 'setpass'),
-            'unlimited': make_msg_handle(_T('set unlimited retries for'), 'unlimited')
+            'unlimited': make_msg_handle(_T('set unlimited retries for'), 'unlimited'),
+            'insert': make_msg_handle('insert new profile', 'insert')
         }
         for name, func in COMMAND_MAPPING.items():
             if msg.data.startswith(name):
@@ -958,8 +1016,8 @@ class CustomServiceBot:
             await client.edit_message_reply_markup(msg.message.chat.id, msg.message.message_id)
             await msg.answer('Canceled')
         elif msg.data.startswith('unban'):
-            await self.mysqldb.execute("UPDATE `tickets_user` SET `baned` = 0 WHERE `user_id` = %s",
-                                       msg.data.split()[-1])
+            await self.pgsqldb.execute('''UPDATE "tickets_user" SET "banned" = false WHERE "user_id" = $1''',
+                                       int(msg.data.split()[-1]))
             await msg.answer('UNBANED')
             await client.edit_message_reply_markup(msg.message.chat.id, msg.message.message_id)
         elif msg.data.startswith('refresh'):
@@ -978,10 +1036,10 @@ class CustomServiceBot:
             try:
                 await self.confirm(client, msg)
             except TimeoutError:
-                await msg.answer('Confirmation time out')
-                await client.edit_message_reply_markup(msg.message.chat.id, msg.message.message_id)
+                await asyncio.gather(msg.answer('Confirmation time out'),
+                                     client.edit_message_reply_markup(msg.message.chat.id, msg.message.message_id))
         elif any(msg.data.startswith(x) for x in
-                 ('close', 'block', 'send', 'bypass', 'reset', 'unlimited', 'del', 'renew', 'setpass')):
+                 ('close', 'block', 'send', 'bypass', 'reset', 'unlimited', 'del', 'renew', 'setpass', 'insert')):
             await self.send_confirm(client, msg)
         else:
             try:
@@ -1000,8 +1058,7 @@ class CustomServiceBot:
         return 0 if r is None else int(r.decode())
 
     async def _update_redis_time(self, key: str) -> None:
-        await self._redis.set(key, str(int(time.time())))
-        await self._redis.expire(key, 180)
+        await self._redis.set(key, str(int(time.time())), expire=180)
 
     async def _update_last_time(self, msg: Message) -> None:
         await self._update_redis_time(f'CSLAST_{msg.chat.id}')
@@ -1015,7 +1072,7 @@ class CustomServiceBot:
             if msg.text:
                 logger.warning('Caught flood %s: %s', msg.chat.id, msg.text)
             await self._update_last_msg_send(msg)
-            sq = await self.mysqldb.query1("SELECT `baned` FROM `tickets_user` WHERE `user_id` = %s", msg.chat.id)
+            sq = await self.pgsqldb.query1('''SELECT "banned" FROM "tickets_user" WHERE "user_id" = $1''', msg.chat.id)
             if sq and sq['baned']:
                 return await msg.reply(
                     _T('Due to privacy settings, you are temporarily unable to operate.')) is not None

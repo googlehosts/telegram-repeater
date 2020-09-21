@@ -21,8 +21,9 @@ replace_to_id =
 [i18n]
 language=en_US
 
-[database]
-host = 
-user = 
+[pgsql]
+host = 127.0.0.1
+port = 5432
+user =
 passwd =
-db_name =
+database =
