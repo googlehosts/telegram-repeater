@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # utils.py
-# Copyright (C) 2018-2020 github.com/googlehosts Group:Z
+# Copyright (C) 2018-2021 github.com/googlehosts Group:Z
 #
 # This module is part of googlehosts/telegram-repeater and is released under
 # the AGPL v3 License: https://www.gnu.org/licenses/agpl-3.0.txt
@@ -18,6 +18,7 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
+from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
@@ -28,8 +29,7 @@ import traceback
 import warnings
 from configparser import ConfigParser
 from dataclasses import dataclass
-from typing import (Dict, List, Mapping, Optional, Sequence, SupportsBytes,
-                    Tuple, TypeVar, Union)
+from typing import Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
 import asyncpg
 from pyrogram import Client
@@ -46,6 +46,7 @@ _FixedDataType = TypeVar('_FixedDataType', str, bool, int)
 class TextParser:
     class BuildMessage:
         def __init__(self, msg: Message):
+            # NOTE: Remove special handling code in the official version
             self.text: bytes = (msg.text if msg.text else msg.caption if msg.caption else '').encode('utf-16-le')
             self.chat_id: int = msg.chat.id
             self.entities: List[MessageEntity] = msg.entities if msg.text else msg.caption_entities
@@ -96,11 +97,13 @@ class TextParser:
     def parse_html_msg(self) -> str:
         result = []
         tag_stack = []
+        # self.text = msg['text'].encode(_ENCODE)
         if self._msg.entities is None:
             return self._msg.text.decode('utf-16-le')
         start_pos = set(_entity.offset * 2 for _entity in self._msg.entities if _entity.type in self.filter_keyword)
         if not len(start_pos):
             return self._msg.text.decode('utf-16-le')
+        # print(start_pos)
         _close_tag_pos = -1
         _close_tag = ''
         _last_cut = 0
@@ -182,10 +185,12 @@ class PgSQLdb:
         self.user: str = user
         self.password: str = password
         self.db: str = db
-        self.pgsql_connection: asyncpg.connection = None
+        self.execute_lock: asyncio.Lock = asyncio.Lock()
+        self.pgsql_connection: asyncpg.pool.Pool = None
+        self.last_execute_time: float = 0.0
 
     async def create_connect(self) -> None:
-        self.pgsql_connection = await asyncpg.connect(
+        self.pgsql_connection = await asyncpg.create_pool(
             host=self.host,
             port=self.port,
             user=self.user,
@@ -205,18 +210,21 @@ class PgSQLdb:
         await self.create_connect()
         return self
 
-    async def query(self, sql: str, *args: Optional[_FixedDataType]) -> Tuple[asyncpg.Record, ...]:
-        return await self.pgsql_connection.fetch(sql, *args)
+    async def query(self, sql: str, *args: Optional[_FixedDataType]) -> List[asyncpg.Record]:
+        async with self.pgsql_connection.acquire() as conn:
+            return await conn.fetch(sql, *args)
 
     async def query1(self, sql: str, *args: Optional[_FixedDataType]) -> Optional[asyncpg.Record]:
-        return await self.pgsql_connection.fetchrow(sql, *args)
+        async with self.pgsql_connection.acquire() as conn:
+            return await conn.fetchrow(sql, *args)
 
     async def execute(self, sql: str, *args: Union[Sequence[Tuple[_FixedDataType, ...]],
                                                    Optional[_FixedDataType]], many: bool = False) -> None:
-        if many:
-            await self.pgsql_connection.executemany(sql, *args)
-        else:
-            await self.pgsql_connection.execute(sql, *args)
+        async with self.pgsql_connection.acquire() as conn:
+            if many:
+                await conn.executemany(sql, *args)
+            else:
+                await conn.execute(sql, *args)
 
     async def close(self) -> None:
         await self.pgsql_connection.close()
@@ -250,6 +258,13 @@ class PgSQLdb:
 
     async def get_reply_id_reverse(self, msg: Message) -> Optional[int]:
         return await self.get_id(msg.reply_to_message.message_id, True) if msg.reply_to_message else None
+
+    async def get_msg_name_history_channel_msg_id(self, msg: Message) -> int:
+        return (await self.query1(
+            '''SELECT "channel_msg_id" FROM "username" WHERE "user_id" = (
+                    SELECT "user_id" FROM "msg_id" WHERE "target_id" = $1
+            )''',
+            msg.reply_to_message.message_id))['channel_msg_id']
 
     async def insert_new_warn(self, user_id: int, msg: str, msg_id: Optional[int]) -> int:
         await self.execute('''INSERT INTO "reasons" ("user_id", "text", "msg_id") VALUES ($1, $2, $3)''',
@@ -372,8 +387,10 @@ class InviteLinkTracker:
         )
 
     async def _boost_run(self) -> None:
+        # Wait start:
         while not self.client.is_connected:
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
+        # Do revoke first. (init process)
         await self.do_revoke()
         while not self.stop_event.is_set():
             try:
@@ -409,7 +426,7 @@ class AuthSystem:
             self.authed_user.append(owner)
 
     @classmethod
-    async def create(cls, conn: PgSQLdb, owner: Optional[int] = None) -> 'AuthSystem':
+    async def create(cls, conn: PgSQLdb, owner: Optional[int] = None) -> AuthSystem:
         self = cls(conn)
         try:
             await self.init(owner)
@@ -470,13 +487,13 @@ class AuthSystem:
             pass
 
     @staticmethod
-    def get_instance() -> 'AuthSystem':
+    def get_instance() -> AuthSystem:
         if AuthSystem.class_self is None:
             raise RuntimeError('Instance not initialize')
         return AuthSystem.class_self
 
     @staticmethod
-    async def initialize_instance(conn: PgSQLdb, owner: int = None) -> 'AuthSystem':
+    async def initialize_instance(conn: PgSQLdb, owner: int = None) -> AuthSystem:
         AuthSystem.class_self = await AuthSystem.create(conn, owner)
         return AuthSystem.class_self
 

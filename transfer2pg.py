@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # transfer2pg.py
-# Copyright (C) 2019-2020 github.com/googlehosts Group:Z
+# Copyright (C) 2019-2021 github.com/googlehosts Group:Z
 #
 # This module is part of googlehosts/telegram-repeater and is released under
 # the AGPL v3 License: https://www.gnu.org/licenses/agpl-3.0.txt
@@ -21,7 +21,7 @@
 import asyncio
 from configparser import ConfigParser
 from datetime import datetime
-from typing import Any, Callable, List, Tuple, Union
+from typing import Any, Callable, Tuple, Union
 
 import aiomysql
 import asyncpg
@@ -73,6 +73,8 @@ async def main() -> None:
             await exec_and_insert(cursor, "SELECT * FROM tickets_user", pgsql_connection,
                                   '''INSERT INTO tickets_user VALUES ($1, $2, $3, $4, $5, $6, $7)''',
                                   transfer_stage_3)
+            await exec_and_insert(cursor, "SELECT * FROM username", pgsql_connection,
+                                  '''INSERT INTO username VALUES ($1, $2, $3)''')
     await pgsql_connection.close()
     mysql_connection.close()
     await mysql_connection.wait_closed()
@@ -97,12 +99,23 @@ def transfer_stage_3(obj: Tuple[int, datetime, datetime, int, datetime, int, str
 async def exec_and_insert(cursor, sql: str, pg_connection, insert_sql: str,
                           process: Callable[[Any], Any] = None) -> None:
     print('Processing table:', sql[13:])
+    if await pg_connection.fetchrow(f'{sql} LIMIT 1') is not None:
+        if input(f'Table {sql[13:]} has data, do you still want to process insert? [y/N]: ').strip().lower() != 'y':
+            return
     await cursor.execute(sql)
     for sql_obj in await cursor.fetchall():
         if process is not None:
             sql_obj = process(sql_obj)
+        # print(type(sql_obj), len(sql_obj), *sql_obj)
         await pg_connection.execute(insert_sql, *sql_obj)
     return
+    await cursor.execute('''SELECT `AUTO_INCREMENT`
+        FROM  INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = %s
+        AND   TABLE_NAME   = 'TableName';''', mdatabase)
+    obj = await cursor.fetchall()
+    if len(obj):
+        await pg_connection.execute('''ALTER SEQUENCE product_id_seq RESTART WITH $1''')
 
 
 async def clean(pgsql_connection: asyncpg.connection) -> None:
@@ -114,6 +127,8 @@ async def clean(pgsql_connection: asyncpg.connection) -> None:
     await pgsql_connection.execute('''TRUNCATE "reasons"''')
     await pgsql_connection.execute('''TRUNCATE "tickets"''')
     await pgsql_connection.execute('''TRUNCATE "tickets_user"''')
+    await pgsql_connection.execute('''TRUNCATE "username"''')
+
 
 if __name__ == '__main__':
     asyncio.get_event_loop().run_until_complete(main())

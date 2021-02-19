@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # customservice.py
-# Copyright (C) 2019-2020 github.com/googlehosts Group:Z
+# Copyright (C) 2019-2021 github.com/googlehosts Group:Z
 #
 # This module is part of googlehosts/telegram-repeater and is released under
 # the AGPL v3 License: https://www.gnu.org/licenses/agpl-3.0.txt
@@ -18,6 +18,7 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
+from __future__ import annotations
 import asyncio
 import base64
 import gettext
@@ -44,7 +45,7 @@ from pyrogram.types import (CallbackQuery, InlineKeyboardButton,
 
 import utils
 
-logger = logging.getLogger('customservice')
+logger = logging.getLogger('telegram-repeater').getChild('customservice')
 
 translation = gettext.translation('customservice', 'translations/',
                                   languages=[utils.get_language()], fallback=True)
@@ -61,7 +62,7 @@ class TextParser(utils.TextParser):
         self._msg = self.BuildMessage(msg)
         self.parsed_msg = self.parse_main()
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.parsed_msg
 
 
@@ -100,6 +101,7 @@ class ProblemSet:
                  remove_punctuations: RemovePunctuations):
         self._redis: aioredis.Redis = redis_conn
         self._prefix: str = utils.get_random_string()
+        self.version: int = problem_set['version']
         self.problem_length: int = len(problem_set['problems']['problem_set'])
         self.sample_problem: Dict[str, str] = problem_set['problems'].get('sample_problem')
         self._has_sample: bool = bool(self.sample_problem)
@@ -159,7 +161,7 @@ class ProblemSet:
                 'A': (await self._redis.get(f'{self._prefix}_A_sample')).decode()}
 
     @staticmethod
-    def get_instance() -> 'ProblemSet':
+    def get_instance() -> ProblemSet:
         if ProblemSet._self is None:
             raise RuntimeError()
         return ProblemSet._self
@@ -172,6 +174,9 @@ class ProblemSet:
 
 
 class JoinGroupVerify:
+
+    class ProblemVersionException(Exception):
+        pass
 
     def __init__(self, conn: utils.PgSQLdb, botapp: Client, target_group: int, working_group: int):
         self.conn: utils.PgSQLdb = conn
@@ -242,20 +247,24 @@ class JoinGroupVerify:
         return self._revoke_tracker_coro
 
     async def query_user_passed(self, user_id: int) -> bool:
-        sqlObj = await self.conn.query1('''SELECT "passed", "bypass" FROM "exam_user_session" WHERE "user_id" = $1''',
-                                        user_id)
-        return sqlObj is not None and (sqlObj['passed'] or sqlObj['bypass'])
+        sql_obj = await self.conn.query1('''SELECT "passed", "bypass" FROM "exam_user_session" WHERE "user_id" = $1''',
+                                         user_id)
+        return sql_obj is not None and (sql_obj['passed'] or sql_obj['bypass'])
 
     async def handle_bot_private(self, client: Client, msg: Message) -> None:
-        if msg.text.startswith('/') and msg.text != '/start newbie': return
-        userObj = await self.conn.query1(
-            '''SELECT "problem_id", "baned", "bypass", "retries", "passed", "unlimited" 
+        if msg.text.startswith('/') and msg.text != '/start newbie':
+            return
+        user_obj = await self.conn.query1(
+            '''SELECT "problem_id", "problem_version", "baned", "bypass", "retries", "passed", "unlimited" 
             FROM "exam_user_session" WHERE "user_id" = $1''',
             msg.chat.id)
         if msg.text == '/start newbie':
             try:
                 try:
+                    # raise Exception
                     user = await self.botapp.get_chat_member(self.target_group, msg.chat.id)
+                    # print(user.status)
+                    # if user.status in ('member', 'administrator', 'creator', 'restricted'):
                     if user.status == 'left':
                         raise ValueError('left')
                     await msg.reply(_T('You are already in the group.'))
@@ -264,27 +273,31 @@ class JoinGroupVerify:
                     pass
                 except:
                     logger.exception('Exception occurred while checking user status')
-                if userObj is not None:
-                    if userObj['bypass']:
+                if user_obj is not None:
+                    if user_obj['bypass']:
                         await self._revoke_tracker_coro.send_link(msg.chat.id, True)
-                    elif userObj['passed']:
+                    elif user_obj['passed']:
                         await msg.reply(_T('You have already answered the question.'))
-                    elif userObj['baned']:
+                    elif user_obj['baned']:
                         await msg.reply(_T('Due to privacy settings, you are temporarily unable to join this group.'))
                     else:
                         await msg.reply(_T('An existing session is currently active.'), True)
                 else:
-                    randomid = self.problems.get_random_number()
+                    random_id = self.problems.get_random_number()
+
+                    # Query user status
                     await self.conn.execute(
-                        '''INSERT INTO "exam_user_session" ("user_id", "problem_id", "timestamp")
-                        VALUES ($1, $2, CURRENT_TIMESTAMP)''',
-                        msg.chat.id, randomid)
+                        '''INSERT INTO "exam_user_session" ("user_id", "problem_version", "problem_id", "timestamp")
+                        VALUES ($1, $3, $2, CURRENT_TIMESTAMP)''',
+                        msg.chat.id, random_id, self.problems.version)
                     await msg.reply(
                         self._welcome_msg,
                         parse_mode='html',
                         disable_web_page_preview=True,
                         **self._keyboard
                     )
+
+                    # Send sample problem
                     if self.problems.has_sample:
                         await msg.reply(
                             _T('For example:\n</b> <code>{Q}</code>\n<b>A:</b> <code>{A}</code>').format(
@@ -293,11 +306,15 @@ class JoinGroupVerify:
                             parse_mode='html',
                             disable_web_page_preview=True
                         )
+
+                    # Send problem body
                     await msg.reply(
-                        (await self.problems.get(randomid))['Q'],
+                        (await self.problems.get(random_id))['Q'],
+                        # self.problem_set['problems']['problem_set'][random_id]['Q'],
                         parse_mode='html',
                         disable_web_page_preview=True
                     )
+
             except pyrogram.errors.exceptions.bad_request_400.UserIsBlocked:
                 logger.warning('Caught blocked user %s', msg.chat.id)
                 await client.send_message(
@@ -306,39 +323,42 @@ class JoinGroupVerify:
                     'markdown'
                 )
             except:
-                logger.exception('Exception occurred in check newbie function')
+                logger.exception('Unexpect exception occurred in check newbie function')
         else:
-            # if msg.chat.id in user_session:
-            if userObj is not None:
-                if (userObj['unlimited'] or userObj['retries'] <= self.max_retry) and \
-                        self.valid_answer(msg, await self.problems.get(userObj['problem_id'])):
+            if user_obj is None:
+                return
+            if user_obj['problem_version'] != self.problems.version:
+                await msg.reply(_T('Problem version updated, please request new problem by submitting a ticket.'))
+                return
+            if user_obj['unlimited'] or user_obj['retries'] <= self.max_retry:
+                if self.valid_answer(msg, await self.problems.get(user_obj['problem_id'])):
                     await self.conn.execute('''UPDATE "exam_user_session" SET "passed" = true WHERE "user_id" = $1''',
                                             msg.chat.id)
                     await self.send_link(msg)
-                elif userObj['bypass']:
+                    return
+                elif user_obj['bypass']:  # and user_obj['passed']:
                     await self.conn.execute('''UPDATE "exam_user_session" SET "passed" = true WHERE "user_id" = $1''',
                                             msg.chat.id)
                     await self.send_link(msg)
+                    return
+            retries = user_obj['retries'] + 2
+            if retries > self.max_retry:
+                if retries == self.max_retry + 1:
+                    await msg.reply(
+                        '\n\n'.join((self.max_retry_error, self.max_retry_error_detail)),
+                        parse_mode='html', disable_web_page_preview=True
+                    )
+                    logger.debug('%d %s', msg.chat.id, repr(msg.text))
+                    await self._insert_answer_history(msg)
                 else:
-                    retries = userObj['retries'] + 1
-                    retries += 1
-                    if retries > self.max_retry:
-                        if retries == self.max_retry + 1:
-                            await msg.reply(
-                                '\n\n'.join((self.max_retry_error, self.max_retry_error_detail)),
-                                parse_mode='html', disable_web_page_preview=True
-                            )
-                            logger.debug('%d %s', msg.chat.id, repr(msg.text))
-                            await self._insert_answer_history(msg)
-                        else:
-                            await msg.reply(self.max_retry_error_detail, parse_mode='html',
-                                            disable_web_page_preview=True)
-                    else:
-                        await msg.reply(self.try_again, parse_mode='html', disable_web_page_preview=True)
-                        logger.debug('%d %s', msg.chat.id, repr(msg.text))
-                        await self._insert_answer_history(msg)
-                    await self.conn.execute('''UPDATE "exam_user_session" SET "retries" = $1 WHERE "user_id" = $2''',
-                                            retries, msg.chat.id)
+                    await msg.reply(self.max_retry_error_detail, parse_mode='html',
+                                    disable_web_page_preview=True)
+            else:
+                await msg.reply(self.try_again, parse_mode='html', disable_web_page_preview=True)
+                logger.debug('%d %s', msg.chat.id, repr(msg.text))
+                await self._insert_answer_history(msg)
+            await self.conn.execute('''UPDATE "exam_user_session" SET "retries" = $1 WHERE "user_id" = $2''',
+                                    retries, msg.chat.id)
 
     async def _insert_answer_history(self, msg: Message) -> None:
         await self.conn.execute('''INSERT INTO "answer_history" ("user_id", "body") VALUES ($1, $2)''',
@@ -372,7 +392,7 @@ class JoinGroupVerify:
 
     async def send_link(self, msg: Message, from_ticket: bool = False) -> None:
         if self._send_link_confirm:
-            replyobj = dict(
+            reply_obj = dict(
                 text=self._confirm_message,
                 parse_mode='html',
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -380,15 +400,14 @@ class JoinGroupVerify:
                 ])
             )
             if isinstance(msg, int):
-                replyobj.update(dict(chat_id=msg))
-                await self.botapp.send_message(**replyobj)
+                reply_obj.update(dict(chat_id=msg))
+                await self.botapp.send_message(**reply_obj)
             else:
-                await msg.reply(**replyobj)
+                await msg.reply(**reply_obj)
         else:
             await self._revoke_tracker_coro.send_link(msg.chat.id, from_ticket)
 
     def valid_answer(self, msg: Message, problem_body: Dict[str, str]) -> bool:
-        b = False
         text = self.remove_punctuations.replace(msg.text)
         if problem_body.get('use_regular_expression', False):
             b = bool(re.match(problem_body['A'], text))
@@ -405,7 +424,7 @@ class CustomServiceBot:
     SEND_FINISH = 3
     RE_TICKET_ID = re.compile(r'[a-f\d]{32}')
 
-    def __init__(self, config_file: Union[str, ConfigParser], pgsql_handle: Optional[utils.PgSQLdb],
+    def __init__(self, config_file: Union[str, ConfigParser], pgsql_handle: utils.PgSQLdb,
                  send_link_callback: Optional[Callable[[Message, bool], Awaitable]], redis_conn: aioredis.Redis):
 
         if isinstance(config_file, ConfigParser):
@@ -414,12 +433,7 @@ class CustomServiceBot:
             config = ConfigParser()
             config.read(config_file)
 
-        # FIXME: should create PgSQL object in async function
-        self.pgsqldb: utils.PgSQLdb = pgsql_handle if pgsql_handle else utils.PgSQLdb(config['pgsql']['host'],
-                                                                                      config.getint('pgsql', 'port'),
-                                                                                      config['pgsql']['user'],
-                                                                                      config['pgsql']['passwd'],
-                                                                                      config['pgsql']['database'])
+        self.pgsqldb: utils.PgSQLdb = pgsql_handle
         self._redis: aioredis.Redis = redis_conn
         self.bot_id: int = int(config['custom_service']['custom_api_key'].split(':')[0])
         self.bot: Client = Client(
@@ -538,7 +552,7 @@ class CustomServiceBot:
                 await msg.reply(_T(
                     'ERROR: COMMAND FORMAT Please use `/close <ticket number>` or'
                     ' **Reply to the message which contains the ticket number** to close the ticket'),
-                    True, 'markdown', True)
+                    True, 'markdown', disable_notification=True)
                 return
             ticket_id = msg.text.split()[-1]
             if len(ticket_id) != 32:
@@ -561,7 +575,7 @@ class CustomServiceBot:
         await client.send_message(self.help_group,
                                   _T('UPDATE\n[ #{} ]\nThis ticket is already closed by {}').format(
                                       ticket_id,
-                                      utils.TextParser.parse_user_markdown(msg.chat.id, _T('Creater'))),
+                                      utils.TextParser.parse_user_markdown(msg.chat.id, _T('Creator'))),
                                   reply_markup=self.generate_ticket_keyboard(ticket_id, msg.chat.id, other=True))
         await msg.reply(_T('Close ticket success.'), True)
 
@@ -995,7 +1009,7 @@ class CustomServiceBot:
                 'markdown',
                 reply_markup=self.generate_confirm_keyboard('del', msg.data[4:])
             )
-        COMMAND_MAPPING = {
+        command_mapping = {
             'close': make_msg_handle(_T('close this ticket'), 'close'),
             'block': make_msg_handle(_T('block this user'), 'block'),
             'send': make_msg_handle(_T('send the link to'), 'send'),
@@ -1006,7 +1020,7 @@ class CustomServiceBot:
             'unlimited': make_msg_handle(_T('set unlimited retries for'), 'unlimited'),
             'insert': make_msg_handle('insert new profile', 'insert')
         }
-        for name, func in COMMAND_MAPPING.items():
+        for name, func in command_mapping.items():
             if msg.data.startswith(name):
                 await func()
                 break
@@ -1025,7 +1039,7 @@ class CustomServiceBot:
                 await client.edit_message_text(
                     msg.message.chat.id,
                     msg.message.message_id,
-                    await self.generate_superuser_text(msg.data.split()[-1]),
+                    await self.generate_superuser_text(int(msg.data.split()[-1])),
                     'html',
                     reply_markup=msg.message.reply_markup
                 )

@@ -17,11 +17,11 @@ The bot forwards your messages to another group.
 
 ## Operating Environment
 
-Python 3.7 and above is required
+Python 3.9 and above is required
 
 The following libraries are required:
 
-- pyrogram.asyncio (~=1.0.x)
+- pyrogram (~=1.1.x)
 - asyncpg
 - aioredis
 
@@ -76,7 +76,7 @@ Special thanks to `<unknown resource>`, who helped me with the translation.
 
 [![](https://www.gnu.org/graphics/agplv3-155x51.png)](https://www.gnu.org/licenses/agpl-3.0.txt)
 
-Copyright (C) 2018-2020 github.com/googlehosts Group:Z
+Copyright (C) 2018-2021 github.com/googlehosts Group:Z
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or any later version.
 

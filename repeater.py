@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # repeater.py
-# Copyright (C) 2018-2020 github.com/googlehosts Group:Z
+# Copyright (C) 2018-2021 github.com/googlehosts Group:Z
 #
 # This module is part of googlehosts/telegram-repeater and is released under
 # the AGPL v3 License: https://www.gnu.org/licenses/agpl-3.0.txt
@@ -18,13 +18,13 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
+from __future__ import annotations
 import asyncio
-import base64
 import gettext
-import hashlib
 import json
 import logging
 import re
+import sys
 import time
 import traceback
 from configparser import ConfigParser
@@ -49,14 +49,13 @@ from utils import get_language
 config = ConfigParser()
 config.read('config.ini')
 
-logger = logging.getLogger('repeater')
+logger = logging.getLogger('telegram-repeater').getChild('main')
 
 translation = gettext.translation('repeater', 'translations/',
                                   languages=[get_language()], fallback=True)
 
 _T = translation.gettext
 _cT = TypeVar('_cT')
-_problemT = TypeVar('_problemT', Dict, str, bool, int)
 
 
 class TextParser(tp):
@@ -65,11 +64,15 @@ class TextParser(tp):
     def __init__(self, msg: Message):
         self._msg = self.BuildMessage(msg)
         self.parsed_msg = self.parse_main()
-        if msg.chat.id == config.getint('fuduji', 'fudu_group') and self.parsed_msg and self.parsed_msg.startswith(
-                '\\//'): self.parsed_msg = self.parsed_msg[1:]
-        if msg.chat.id == config.getint('fuduji',
-                                        'target_group') and self.parsed_msg: self.parsed_msg = self.parsed_msg.replace(
-            '@{}'.format(TextParser.bot_username), '@{}'.format(config['fuduji']['replace_to_id']))
+        if msg.chat.id == config.getint('fuduji', 'fudu_group') and \
+                self.parsed_msg and self.parsed_msg.startswith('\\//'):
+            self.parsed_msg = self.parsed_msg[1:]
+        if msg.chat.id == config.getint('fuduji', 'target_group') and self.parsed_msg:
+            self.parsed_msg = self.parsed_msg.replace(
+                f'@{TextParser.bot_username}', f"@{config['fuduji']['replace_to_id']}")
+
+
+_problemT = TypeVar('_problemT', Dict, str, bool, int)
 
 
 def external_load_problem_set() -> Dict[str, _problemT]:
@@ -98,10 +101,12 @@ class WaitForDelete:
         asyncio.run_coroutine_threadsafe(self.run(), asyncio.get_event_loop())
 
 
-class OperationTimeoutError(Exception): pass
+class OperationTimeoutError(Exception):
+    """Raise this exception if operation time out"""
 
 
-class OperatorError(Exception): pass
+class OperatorError(Exception):
+    """Raise this exception if operator mismatch"""
 
 
 class BotController:
@@ -140,13 +145,19 @@ class BotController:
         self.custom_service: Optional[CustomServiceBot] = None
         self.problem_set: Optional[Mapping[str, _problemT]] = None
         self.init_handle()
+        logger.debug('Service status: join group verify: %s, custom service: %s',
+                     self.join_group_verify_enable, self.custom_service_enable)
         logger.debug('__init__ method completed')
 
     async def init_connections(self) -> None:
         self._redis = await aioredis.create_redis_pool('redis://localhost')
-        self.conn = await PgSQLdb.create(config['pgsql']['host'], config.getint('pgsql', 'port'),
-                                         config['pgsql']['user'], config['pgsql']['passwd'],
-                                         config['pgsql']['database'])
+        self.conn = await PgSQLdb.create(
+            config['pgsql']['host'],
+            config.getint('pgsql', 'port'),
+            config['pgsql']['user'],
+            config['pgsql']['passwd'],
+            config['pgsql']['database']
+        )
         self.auth_system = await AuthSystem.initialize_instance(self.conn, config.getint('account', 'owner'))
         if self.join_group_verify_enable:
             self.join_group_verify = await JoinGroupVerify.create(self.conn, self.botapp, self.target_group,
@@ -158,21 +169,26 @@ class BotController:
                 self.custom_service = CustomServiceBot(config, self.conn, self.join_group_verify.send_link, self._redis)
 
     @classmethod
-    async def create(cls) -> 'BotController':
+    async def create(cls) -> BotController:
         self = BotController()
         await self.init_connections()
         return self
 
     def init_handle(self) -> None:
-        self.app.add_handler(MessageHandler(self.handle_edit, filters.chat(self.target_group) & ~filters.user(
-            self.bot_id) & filters.edited))
+        self.app.add_handler(
+            MessageHandler(self.handle_edit, filters.chat(self.target_group) & ~filters.user(
+                self.bot_id) & filters.edited))
         self.app.add_handler(
             MessageHandler(self.handle_new_member, filters.chat(self.target_group) & filters.new_chat_members))
         self.app.add_handler(
             MessageHandler(self.handle_service_messages, filters.chat(self.target_group) & filters.service))
-        self.app.add_handler(MessageHandler(self.handle_all_media,
-                                            filters.chat(self.target_group) & ~filters.user(self.bot_id) & (
-                                                    filters.photo | filters.video | filters.document | filters.animation | filters.voice)))
+        self.app.add_handler(
+            MessageHandler(
+                self.handle_all_media,
+                filters.chat(self.target_group) & ~filters.user(self.bot_id) & (
+                    filters.photo | filters.video | filters.document | filters.animation | filters.voice)
+            )
+        )
         self.app.add_handler(MessageHandler(self.handle_dice, filters.chat(self.target_group) & ~filters.user(
             self.bot_id) & filters.media))
         self.app.add_handler(MessageHandler(self.handle_sticker, filters.chat(self.target_group) & ~filters.user(
@@ -186,10 +202,11 @@ class BotController:
 
     async def init(self) -> None:
         while not self.botapp.is_connected:
-            await asyncio.sleep(.01)
+            await asyncio.sleep(.5)
         TextParser.bot_username = (await self.botapp.get_me()).username
 
-    async def idle(self) -> None:
+    @staticmethod
+    async def idle() -> None:
         await pyrogram.idle()
 
     async def start(self) -> None:
@@ -204,7 +221,7 @@ class BotController:
             self.revoke_tracker_coro.request_stop()
             await self.revoke_tracker_coro.join(1.5)
             if self.revoke_tracker_coro.is_alive:
-                logger.warning('revoke_tracker_coro still running!')
+                logger.warning('revoke_tracker_coroutine still running!')
             if self.custom_service_enable:
                 task_pending.append(asyncio.create_task(self.custom_service.stop()))
         task_pending.append(asyncio.create_task(self.botapp.stop()))
@@ -216,9 +233,7 @@ class BotController:
             await self.join_group_verify.problems.destroy()
 
         self._redis.close()
-        task_pending.append(asyncio.create_task(self.conn.close()))
-        task_pending.append(asyncio.create_task(self._redis.wait_closed()))
-        await asyncio.wait(task_pending)
+        await asyncio.gather(self.conn.close(), self._redis.wait_closed())
 
     async def handle_service_messages(self, _client: Client, msg: Message) -> None:
         if msg.pinned_message:
@@ -228,10 +243,14 @@ class BotController:
             else:
                 text = f'a {text}'
             await self.conn.insert_ex(
-                (await self.botapp.send_message(self.fudu_group, f'Pined \'{text}\'', disable_web_page_preview=True,
-                                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                                    [InlineKeyboardButton(text='UNPIN', callback_data='unpin')]
-                                                ]))).message_id, msg.message_id
+                (await self.botapp.send_message(
+                    self.fudu_group, f'Pined \'{text}\'',
+                    disable_web_page_preview=True,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text='UNPIN', callback_data='unpin')]
+                    ]))
+                ).message_id,
+                msg.message_id
             )
         elif msg.new_chat_title:
             await self.conn.insert_ex(
@@ -241,7 +260,7 @@ class BotController:
                 msg.message_id
             )
         else:
-            logger.info('Got unexcept service message: %s', repr(msg))
+            logger.info('Got unexpect service message: %s', repr(msg))
 
     async def generate_warn_message(self, user_id: int, reason: str) -> str:
         return _T('You were warned.(Total: {})\nReason: <pre>{}</pre>').format(
@@ -249,12 +268,15 @@ class BotController:
 
     async def process_incoming_command(self, client: Client, msg: Message) -> None:
         r = re.match(r'^/bot (on|off)$', msg.text)
-        if r is None: r = re.match(r'^/b?(on|off)$', msg.text)
+        if r is None:
+            r = re.match(r'^/b?(on|off)$', msg.text)
         if r:
             if not self.auth_system.check_ex(
                     msg.reply_to_message.from_user.id if msg.reply_to_message else msg.from_user.id): return
-            await self.auth_system.mute_or_unmute(r.group(1),
-                                                  msg.reply_to_message.from_user.id if msg.reply_to_message else msg.from_user.id)
+            await self.auth_system.mute_or_unmute(
+                r.group(1),
+                msg.reply_to_message.from_user.id if msg.reply_to_message else msg.from_user.id
+            )
             await msg.delete()
 
         if msg.text == '/status':
@@ -275,24 +297,28 @@ class BotController:
                 user_id = msg.reply_to_message.from_user.id
             else:
                 user_id = int(msg.text.split()[1])
-            await self.botapp.send_message(msg.chat.id,
-                                           'Please use bottom to make sure you want to add {} to Administrators'.format(
-                                               TextParser.parse_user_markdown(user_id)),
-                                           parse_mode='markdown',
-                                           reply_to_message_id=msg.message_id,
-                                           reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                               [
-                                                   InlineKeyboardButton(text='Yes, confirm',
-                                                                        callback_data=f'promote {user_id}')
-                                               ],
-                                               [
-                                                   InlineKeyboardButton(text='Cancel', callback_data='cancel d')
-                                               ]
-                                           ]))
+            await self.botapp.send_message(
+                msg.chat.id,
+                'Please use bottom to make sure you want to add {} to Administrators'.format(
+                    TextParser.parse_user_markdown(user_id)),
+                parse_mode='markdown',
+                reply_to_message_id=msg.message_id,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text='Yes, confirm',
+                            callback_data=f'promote {user_id}'
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(text='Cancel', callback_data='cancel d')
+                    ]
+                ]))
             return
 
         elif msg.text.startswith('/su'):
-            if not self.auth_system.check_ex(msg.from_user.id): return
+            if not self.auth_system.check_ex(msg.from_user.id):
+                return
             await self.botapp.promote_chat_member(
                 self.target_group,
                 int(msg.from_user.id),
@@ -309,7 +335,8 @@ class BotController:
             )
 
         elif msg.text.startswith('/title'):
-            if not self.auth_system.check_ex(msg.from_user.id): return
+            if not self.auth_system.check_ex(msg.from_user.id):
+                return
             await self.botapp.set_chat_title(
                 self.target_group,
                 msg.text.split(maxsplit=2)[1]
@@ -336,8 +363,7 @@ class BotController:
                 user_id = await self.conn.get_user_id(msg)
                 await msg.reply(
                     'user_id is `{}`'.format(
-                        user_id['user_id'] if user_id is not None and user_id['user_id'] else \
-                            'ERROR_INVALID_USER_ID'
+                        user_id['user_id'] if user_id is not None and user_id['user_id'] else 'ERROR_INVALID_USER_ID'
                     ),
                     parse_mode='markdown'
                 )
@@ -375,7 +401,8 @@ class BotController:
                     if user_id['user_id'] not in self.auth_system.whitelist:
                         await self.botapp.send_message(
                             msg.chat.id,
-                            'What can {} only do? Press the button below.\nThis confirmation message will expire after 20 seconds.'.format(
+                            'What can {} only do? Press the button below.\n'
+                            'This confirmation message will expire after 20 seconds.'.format(
                                 TextParser.parse_user_markdown(user_id['user_id'])
                             ),
                             reply_to_message_id=msg.message_id,
@@ -383,20 +410,25 @@ class BotController:
                             reply_markup=InlineKeyboardMarkup(
                                 inline_keyboard=[
                                     [
-                                        InlineKeyboardButton(text='READ',
-                                                             callback_data=f"res {restrict_time} read {user_id['user_id']}")
+                                        InlineKeyboardButton(
+                                            text='READ',
+                                            callback_data=f"res {restrict_time} read {user_id['user_id']}")
                                     ],
                                     [
-                                        InlineKeyboardButton(text='SEND_MESSAGES',
-                                                             callback_data=f"res {restrict_time} write {user_id['user_id']}"),
-                                        InlineKeyboardButton(text='SEND_MEDIA',
-                                                             callback_data=f"res {restrict_time} media {user_id['user_id']}")
+                                        InlineKeyboardButton(
+                                            text='SEND_MESSAGES',
+                                            callback_data=f"res {restrict_time} write {user_id['user_id']}"),
+                                        InlineKeyboardButton(
+                                            text='SEND_MEDIA',
+                                            callback_data=f"res {restrict_time} media {user_id['user_id']}")
                                     ],
                                     [
-                                        InlineKeyboardButton(text='SEND_STICKERS',
-                                                             callback_data=f"res {restrict_time} stickers {user_id['user_id']}"),
-                                        InlineKeyboardButton(text='EMBED_LINKS',
-                                                             callback_data=f"res {restrict_time} link {user_id['user_id']}")
+                                        InlineKeyboardButton(
+                                            text='SEND_STICKERS',
+                                            callback_data=f"res {restrict_time} stickers {user_id['user_id']}"),
+                                        InlineKeyboardButton(
+                                            text='EMBED_LINKS',
+                                            callback_data=f"res {restrict_time} link {user_id['user_id']}")
                                     ],
                                     [
                                         InlineKeyboardButton(text='Cancel', callback_data='cancel')
@@ -405,35 +437,49 @@ class BotController:
                             )
                         )
                     else:
-                        await self.botapp.send_message(msg.chat.id, 'ERROR_WHITELIST_USER_ID',
-                                                       reply_to_message_id=msg.message_id)
+                        await self.botapp.send_message(
+                            msg.chat.id,
+                            'ERROR_WHITELIST_USER_ID',
+                            reply_to_message_id=msg.message_id
+                        )
                 else:
-                    await self.botapp.send_message(msg.chat.id, 'ERROR_INVALID_USER_ID',
-                                                   reply_to_message_id=msg.message_id)
+                    await self.botapp.send_message(
+                        msg.chat.id,
+                        'ERROR_INVALID_USER_ID',
+                        reply_to_message_id=msg.message_id
+                    )
 
             elif msg.text == '/kick':
                 user_id = await self.conn.get_user_id(msg)
                 if user_id is not None and user_id['user_id']:
                     if user_id['user_id'] not in self.auth_system.whitelist:
-                        await self.botapp.send_message(msg.chat.id,
-                                                       'Do you really want to kick {}?\nIf you really want to kick this user, press the button below.\nThis confirmation message will expire after 15 seconds.'.format(
-                                                           TextParser.parse_user_markdown(user_id['user_id'])
-                                                       ),
-                                                       reply_to_message_id=msg.message_id,
-                                                       parse_mode='markdown',
-                                                       reply_markup=InlineKeyboardMarkup(
-                                                           inline_keyboard=[
-                                                               [
-                                                                   InlineKeyboardButton(text='Yes, kick it',
-                                                                                        callback_data=f'kick {msg.from_user.id} {user_id["user_id"]}')
-                                                               ],
-                                                               [
-                                                                   InlineKeyboardButton(text='No',
-                                                                                        callback_data='cancel')
-                                                               ],
-                                                           ]
-                                                       )
-                                                       )
+                        await self.botapp.send_message(
+                            msg.chat.id,
+                            'Do you really want to kick {}?\n'
+                            'If you really want to kick this user, press the button below.\n'
+                            'This confirmation message will expire after 15 seconds.'.format(
+                                TextParser.parse_user_markdown(user_id['user_id'])
+                            ),
+                            reply_to_message_id=msg.message_id,
+                            parse_mode='markdown',
+                            reply_markup=InlineKeyboardMarkup(
+                                inline_keyboard=[
+                                    [
+                                        InlineKeyboardButton(
+                                            text='Yes, kick it',
+                                            callback_data=f'kick {msg.from_user.id} '
+                                                          f'{user_id["user_id"]}'
+                                        )
+                                    ],
+                                    [
+                                        InlineKeyboardButton(
+                                            text='No',
+                                            callback_data='cancel'
+                                        )
+                                    ],
+                                ]
+                            )
+                        )
                     else:
                         await self.botapp.send_message(msg.chat.id, 'ERROR_WHITELIST_USER_ID',
                                                        reply_to_message_id=msg.message_id)
@@ -458,8 +504,11 @@ class BotController:
                 dry_run = msg.text.split()[0].endswith('d')
                 fwd_msg = None
                 if self.warn_evidence_history_channel != 0:
-                    fwd_msg = (await self.app.forward_messages(self.warn_evidence_history_channel, self.target_group,
-                                                               target_id, True)).message_id
+                    fwd_msg = (await self.app.forward_messages(
+                        self.warn_evidence_history_channel,
+                        self.target_group,
+                        target_id,
+                        True)).message_id
                 if dry_run:
                     await self.botapp.send_message(self.fudu_group, await self.generate_warn_message(user_id, reason),
                                                    reply_to_message_id=msg.reply_to_message.message_id)
@@ -468,18 +517,28 @@ class BotController:
                     warn_msg = await self.botapp.send_message(self.target_group,
                                                               await self.generate_warn_message(user_id, reason),
                                                               reply_to_message_id=target_id)
-                    await self.botapp.send_message(self.fudu_group, _T('WARN SENT TO {}, Total warn {} time(s)').format(
-                        TextParser.parse_user_markdown(user_id), await self.conn.query_warn_by_user(user_id)),
-                                                   parse_mode='markdown', reply_to_message_id=msg.message_id,
-                                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                                       [InlineKeyboardButton(text=_T('RECALL'),
-                                                                             callback_data=f'warndel {warn_msg.message_id} {warn_id}')]
-                                                   ]))
+                    await self.botapp.send_message(
+                        self.fudu_group,
+                        _T('WARN SENT TO {}, Total warn {} time(s)').format(
+                            TextParser.parse_user_markdown(user_id),
+                            await self.conn.query_warn_by_user(user_id)
+                        ),
+                        parse_mode='markdown', reply_to_message_id=msg.message_id,
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text=_T('RECALL'),
+                                    callback_data=f'warndel {warn_msg.message_id} {warn_id}'
+                                )
+                            ]
+                        ]))
 
         else:  # Not reply message
             if msg.text == '/ban':
-                await client.send_message(msg.chat.id, _T(
-                    'Reply to the user you wish to restrict, if you want to kick this user, please use the /kick command.'))
+                await client.send_message(
+                    msg.chat.id, _T(
+                        'Reply to the user you wish to restrict, '
+                        'if you want to kick this user, please use the /kick command.'))
 
             elif msg.text == '/report':
                 if self.join_group_verify_enable:
@@ -490,7 +549,8 @@ class BotController:
                         total_count, correct_count = await asyncio.gather(self.conn.query1(
                             '''SELECT COUNT(*) FROM "exam_user_session" WHERE "problem_id" = $1''', problem_id),
                             self.conn.query1(
-                                '''SELECT COUNT(*) FROM "exam_user_session" WHERE "problem_id" = $1 and "passed" = true''',
+                                '''SELECT COUNT(*) FROM "exam_user_session"
+                                 WHERE "problem_id" = $1 and "passed" = true''',
                                 problem_id))
                         result.append(
                             '`{}`: `{:.2f}`% / `{:.2f}`%'.format(problem_id,
@@ -500,19 +560,22 @@ class BotController:
 
             elif msg.text.startswith('/grant'):
                 user_id = msg.text.split()[-1]
-                await self.botapp.send_message(msg.chat.id,
-                                               'Do you want to grant user {}?'.format(
-                                                   TextParser.parse_user_markdown(user_id)),
-                                               disable_notification=True,
-                                               reply_to_message_id=msg.message_id, reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton('CHANGE INFO', f'grant {user_id} info'),
-                         InlineKeyboardButton('PIN', f'grant {user_id} pin')],
-                        [InlineKeyboardButton('RESTRICT', f'grant {user_id} restrict'),
-                         InlineKeyboardButton('DELETE', f'grant {user_id} delete')],
-                        [InlineKeyboardButton('confirm', f'grant {user_id} confirm'),
-                         InlineKeyboardButton('[DEBUG]Clear', f'grant {user_id} clear')],
-                        [InlineKeyboardButton('cancel', 'cancel')]
-                    ]))
+                await self.botapp.send_message(
+                    msg.chat.id,
+                    'Do you want to grant user {}?'.format(
+                        TextParser.parse_user_markdown(user_id)),
+                    disable_notification=True,
+                    reply_to_message_id=msg.message_id,
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [InlineKeyboardButton('CHANGE INFO', f'grant {user_id} info'),
+                             InlineKeyboardButton('PIN', f'grant {user_id} pin')],
+                            [InlineKeyboardButton('RESTRICT', f'grant {user_id} restrict'),
+                             InlineKeyboardButton('DELETE', f'grant {user_id} delete')],
+                            [InlineKeyboardButton('confirm', f'grant {user_id} confirm'),
+                             InlineKeyboardButton('[DEBUG]Clear', f'grant {user_id} clear')],
+                            [InlineKeyboardButton('cancel', 'cancel')]
+                        ]))
 
     async def func_auth_process(self, _client: Client, msg: Message) -> None:
         if not self.auth_system.check_ex(msg.from_user.id):
@@ -551,7 +614,8 @@ class BotController:
         if msg.text is None: kb.pop(1)
         await self.botapp.send_message(
             msg.chat.id,
-            '<b>Warning:</b> You are requesting forwarding an authorized user\'s message to the main group, please comfirm your action.',
+            '<b>Warning:</b> You are requesting forwarding an authorized user\'s '
+            'message to the main group, please confirm your action.',
             'html',
             reply_to_message_id=msg.message_id,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
@@ -559,7 +623,6 @@ class BotController:
         del kb
 
     async def handle_new_member(self, client: Client, msg: Message) -> None:
-        # print(msg)
         for new_user_id in (x.id for x in msg.new_chat_members):
             # Exam check goes here
             try:
@@ -584,9 +647,7 @@ class BotController:
                     )
                 ),
                 'markdown'
-            ) \
-                if msg.new_chat_members[0].id != msg.from_user.id else \
-                await client.send_message(
+            ) if msg.new_chat_members[0].id != msg.from_user.id else await client.send_message(
                     self.fudu_group,
                     '`{}` joined the group'.format(
                         '`,`'.join(
@@ -598,7 +659,8 @@ class BotController:
         )
 
     async def handle_edit(self, client: Client, msg: Message) -> None:
-        if msg.via_bot and msg.via_bot.id == 166035794: return
+        if msg.via_bot and msg.via_bot.id == 166035794:
+            return
         target_id = await self.conn.get_id(msg.message_id)
         if target_id is None:
             logging.warning('Sleep 2 seconds for edit')
@@ -607,11 +669,12 @@ class BotController:
             if target_id is None:
                 return logger.error('Editing Failure: get_id return None')
         try:
-            await (client.edit_message_text if msg.text else client.edit_message_caption)(self.fudu_group,
-                                                                                          target_id,
-                                                                                          TextParser(
-                                                                                              msg).get_full_message(),
-                                                                                          'html')
+            await (client.edit_message_text if msg.text else client.edit_message_caption)(
+                self.fudu_group,
+                target_id,
+                TextParser(msg).get_full_message(),
+                'html'
+            )
         except pyrogram.errors.MessageNotModified:
             logging.warning('Editing Failure: MessageNotModified')
         except:
@@ -635,18 +698,18 @@ class BotController:
             return None
         return await self.conn.get_id(msg.reply_to_message.message_id, reverse)
 
-    async def send_media(self, client: Client, msg: Message, send_to: int, captain: str, reverse: bool = False) -> None:
+    async def send_media(self, client: Client, msg: Message, send_to: int, caption: str, reverse: bool = False) -> None:
         msg_type = self.get_file_type(msg)
         while True:
             try:
                 _msg = await client.send_cached_media(
                     send_to,
                     self.get_file_id(msg, msg_type),
-                    self.get_file_ref(msg, msg_type),
-                    captain,
-                    'html',
-                    True,
-                    await self._get_reply_id(msg, reverse)
+                    # self.get_file_ref(msg, msg_type),
+                    caption=caption,
+                    parse_mode='html',
+                    disable_notification=True,
+                    reply_to_message_id=await self._get_reply_id(msg, reverse)
                 )
                 if reverse:
                     await self.conn.insert_ex(_msg.message_id, int(msg.caption.split()[1]))
@@ -676,8 +739,8 @@ class BotController:
                         msg.dice.value
                     ),
                     'html',
-                    True,
-                    True,
+                    disable_web_page_preview=True,
+                    disable_notification=True,
                     reply_to_message_id=await self.conn.get_reply_id(msg)
                 )
             )
@@ -696,31 +759,33 @@ class BotController:
     def get_file_type(msg: Message) -> str:
         return 'photo' if msg.photo else \
             'video' if msg.video else \
-                'animation' if msg.animation else \
-                    'sticker' if msg.sticker else \
-                        'voice' if msg.voice else \
-                            'document' if msg.document else \
-                                'text' if msg.text else 'error'
+            'animation' if msg.animation else \
+            'sticker' if msg.sticker else \
+            'voice' if msg.voice else \
+            'document' if msg.document else \
+            'text' if msg.text else 'error'
 
     async def handle_speak(self, client: Client, msg: Message) -> None:
-        if msg.text.startswith('/') and re.match(r'^/\w+(@\w*)?$', msg.text): return
+        if msg.text.startswith('/') and re.match(r'^/\w+(@\w*)?$', msg.text):
+            return
         await self.conn.insert(
             msg,
             await client.send_message(
                 self.fudu_group,
                 TextParser(msg).get_full_message(),
                 'html',
-                not msg.web_page,
-                True,
+                disable_web_page_preview=not msg.web_page,
+                disable_notification=True,
                 reply_to_message_id=await self.conn.get_reply_id(msg)
             )
         )
 
     async def handle_bot_send_media(self, client: Client, msg: Message) -> None:
-        def parse_captain(captain: str) -> str:
-            obj = captain.split(maxsplit=3)
+        def parse_caption(caption: str) -> str:
+            obj = caption.split(maxsplit=3)
             return '' if len(obj) < 3 else obj[-1]
-        await self.send_media(client, msg, self.target_group, parse_captain(TextParser(msg).split_offset()),
+
+        await self.send_media(client, msg, self.target_group, parse_caption(TextParser(msg).split_offset()),
                               True)
 
     async def handle_incoming(self, client: Client, msg: Message) -> None:
@@ -732,15 +797,19 @@ class BotController:
         if msg.text == '/auth' and msg.reply_to_message:
             return await self.func_auth_process(client, msg)
 
-        if not self.auth_system.check_ex(msg.from_user.id): return
+        if not self.auth_system.check_ex(msg.from_user.id):
+            return
         if msg.text and re.match(
-                r'^/(bot (on|off)|del|get|fw|ban( ([1-9]\d*)[smhd]|f)?|kick( confirm| -?\d+)?|status|b?o(n|ff)|promote( \d+)?|set [a-zA-Z]|pina?|su(do)?|title .*|warnd? .*|grant \d+|report)$',
+                r'^/(bot (on|off)|del|get|fw|ban( ([1-9]\d*)[smhd]|f)?|kick( confirm| -?\d+)?|status|b?o(n|ff)|join|'
+                r'promote( \d+)?|set [a-zA-Z]|pina?|su(do)?|title .*|warnd? .*|grant \d+|report)$',
                 msg.text
         ):
             return await self.process_incoming_command(client, msg)
-        if msg.text and msg.text.startswith('/') and re.match(r'^/\w+(@\w*)?$', msg.text): return
+        if msg.text and msg.text.startswith('/') and re.match(r'^/\w+(@\w*)?$', msg.text):
+            return
         if self.auth_system.check_muted(msg.from_user.id) or (msg.text and msg.text.startswith('//')) or (
-                msg.caption and msg.caption.startswith('//')): return
+                msg.caption and msg.caption.startswith('//')):
+            return
         if msg.forward_from or msg.forward_from_chat or msg.forward_sender_name:
             if msg.forward_from:
                 if msg.forward_from.is_self:
@@ -758,7 +827,7 @@ class BotController:
                     self.target_group,
                     TextParser(msg).split_offset(),
                     'html',
-                    not msg.web_page,
+                    disable_web_page_preview=not msg.web_page,
                     reply_to_message_id=await self.conn.get_reply_id_reverse(msg),
                 )).message_id, msg.message_id
             )
@@ -768,7 +837,7 @@ class BotController:
             await (await client.send_cached_media(
                 msg.chat.id,
                 self.get_file_id(msg, _type),
-                self.get_file_ref(msg, _type),
+                # self.get_file_ref(msg, _type),
                 f'/SendMedia {msg.message_id} {TextParser(msg).split_offset()}',
                 parse_mode='html',
                 disable_notification=True,
@@ -794,7 +863,6 @@ class BotController:
                                                     msg))).message_id,
                 msg.message_id
             )
-
 
     async def handle_callback(self, client: Client, msg: CallbackQuery) -> None:
         if msg.message.chat.id < 0 and msg.message.chat.id != self.fudu_group: return
@@ -828,25 +896,28 @@ class BotController:
                         int(time.time()) + int(dur)
                 ):
                     await msg.answer('The user is restricted successfully.')
-                    await client.edit_message_text(msg.message.chat.id,
-                                                   msg.message.message_id,
-                                                   'Restrictions applied to {} Duration: {}'.format(
-                                                       TextParser.parse_user_markdown(_user_id),
-                                                       '{}s'.format(dur) if int(dur) else 'Forever'),
-                                                   parse_mode='markdown',
-                                                   reply_markup=InlineKeyboardMarkup([
-                                                       [InlineKeyboardButton(text='UNBAN',
-                                                                             callback_data=f'unban {_user_id}')]
-                                                   ]
-                                                   )
-                                                   )
+                    await client.edit_message_text(
+                        msg.message.chat.id,
+                        msg.message.message_id,
+                        'Restrictions applied to {} Duration: {}'.format(
+                            TextParser.parse_user_markdown(_user_id),
+                            f'{dur}s' if int(dur) else 'Forever'),
+                        parse_mode='markdown',
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                            text='UNBAN', callback_data=f'unban {_user_id}')]])
+                    )
 
             elif msg.data.startswith('unban'):
                 if await client.restrict_chat_member(self.target_group, int(args[-1]), ChatPermissions(
                         can_send_messages=True,
-                        can_send_stickers=True, can_send_polls=True, can_add_web_page_previews=True,
-                        can_send_media_messages=True, can_send_animations=True,
-                        can_pin_messages=True, can_invite_users=True, can_change_info=True
+                        can_send_stickers=True,
+                        can_send_polls=True,
+                        can_add_web_page_previews=True,
+                        can_send_media_messages=True,
+                        can_send_animations=True,
+                        can_pin_messages=True,
+                        can_invite_users=True,
+                        can_change_info=True
                 )):
                     await asyncio.gather(msg.answer('Unban successfully'),
                                          client.edit_message_reply_markup(msg.message.chat.id, msg.message.message_id))
@@ -863,9 +934,14 @@ class BotController:
                     raise OperationTimeoutError()
                 if 'original' in msg.data:
                     # Process original forward
-                    await self.conn.insert_ex((await client.forward_messages(self.target_group, msg.message.chat.id,
-                                                                             msg.message.reply_to_message.message_id)).message_id,
-                                              msg.message.reply_to_message.message_id)
+                    await self.conn.insert_ex(
+                        (await client.forward_messages(
+                            self.target_group,
+                            msg.message.chat.id,
+                            msg.message.reply_to_message.message_id)
+                         ).message_id,
+                        msg.message.reply_to_message.message_id
+                    )
                 else:
                     await self.conn.insert_ex((await client.send_message(self.target_group, TextParser(
                         msg.message.reply_to_message).split_offset(), 'html')).message_id,
@@ -873,6 +949,7 @@ class BotController:
                 await asyncio.gather(msg.answer('Forward successfully'), msg.message.delete())
 
             elif msg.data.startswith('kick'):
+                # _TODO: Process parallel request (deprecated)
                 if not msg.data.startswith('kickc') and msg.from_user.id != int(args[-2]):
                     raise OperatorError()
                 if 'true' not in msg.data:
@@ -881,7 +958,8 @@ class BotController:
                     client_args = [
                         msg.message.chat.id,
                         msg.message.message_id,
-                        'Press the button again to kick {}\nThis confirmation message will expire after 10 seconds.'.format(
+                        'Press the button again to kick {}\n'
+                        'This confirmation message will expire after 10 seconds.'.format(
                             TextParser.parse_user_markdown(args[-1])
                         ),
                     ]
@@ -919,25 +997,37 @@ class BotController:
                     if time.time() - msg.message.date > 10:
                         raise OperationTimeoutError()
                     await self.botapp.promote_chat_member(
-                        self.target_group, int(args[1]), True, can_delete_messages=True, can_restrict_members=True,
-                        can_invite_users=True, can_pin_messages=True, can_promote_members=True)
+                        self.target_group,
+                        int(args[1]),
+                        True,
+                        can_delete_messages=True,
+                        can_restrict_members=True,
+                        can_invite_users=True,
+                        can_pin_messages=True,
+                        can_promote_members=True,
+                    )
                     await msg.answer('Promote successfully')
-                    await msg.message.edit('Promoted {}'.format(TextParser.parse_user_markdown(int(args[1]))),
-                                           parse_mode='markdown',
-                                           reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                               [InlineKeyboardButton(text='UNDO',
-                                                                     callback_data=' '.join((msg.data, 'undo')))],
-                                               [InlineKeyboardButton(text='remove button', callback_data='rm')]
-                                           ])
-                                           )
+                    await msg.message.edit(
+                        f'Promoted {TextParser.parse_user_markdown(int(args[1]))}',
+                        parse_mode='markdown',
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text='UNDO', callback_data=' '.join((msg.data, 'undo')))],
+                            [InlineKeyboardButton(text='remove button', callback_data='rm')]])
+                    )
                 else:
-                    await self.botapp.promote_chat_member(self.target_group, int(args[1]), False,
-                                                          can_delete_messages=False, can_invite_users=False,
-                                                          can_restrict_members=False)
-                    await asyncio.gather(msg.answer('Undo Promote successfully'),
-                                         msg.message.edit(
-                                             f'Undo promoted {TextParser.parse_user_markdown(int(args[1]))}',
-                                             parse_mode='markdown'))
+                    await self.botapp.promote_chat_member(
+                        self.target_group, int(args[1]),
+                        False,
+                        can_delete_messages=False,
+                        can_invite_users=False,
+                        can_restrict_members=False
+                    )
+                    await asyncio.gather(
+                        msg.answer('Undo Promote successfully'),
+                        msg.message.edit(
+                            f'Undo promoted {TextParser.parse_user_markdown(int(args[1]))}',
+                            parse_mode='markdown')
+                    )
 
             elif msg.data.startswith('grant'):
                 _redis_key_str = f'promote_{msg.message.chat.id}_{args[1]}'
@@ -971,6 +1061,7 @@ class BotController:
                 else:
                     if time.time() - msg.message.date > 40:
                         raise OperationTimeoutError()
+                    # original_msg = msg.message.text.splitlines()[0]
                     select_privileges = self._redis.get(_redis_key_str)
                     if select_privileges is None:
                         select_privileges = [args[2]]
@@ -990,6 +1081,7 @@ class BotController:
                             TextParser.parse_user_markdown(args[1]),
                             '\n'.join(select_privileges)),
                         reply_markup=msg.message.reply_markup)
+                    # return await msg.answer(f'Promoted {args[2]} permission')
 
             elif msg.data == 'unpin':
                 await self.botapp.unpin_chat_message(self.target_group)
@@ -1023,12 +1115,21 @@ async def main():
 if __name__ == '__main__':
     coloredlogs.install(logging.DEBUG,
                         fmt='%(asctime)s,%(msecs)03d - %(levelname)s - %(funcName)s - %(lineno)d - %(message)s')
-    logging.getLogger("pyrogram").setLevel(logging.WARNING)
+    if '--debug-pyrogram' in sys.argv:
+        # logging.getLogger('pyrogram').setLevel(logging.INFO)
+        pyrogram_file_handler = logging.FileHandler('pyrogram.log')
+        pyrogram_file_handler.setFormatter(
+            coloredlogs.ColoredFormatter(
+                '%(asctime)s,%(msecs)03d - %(levelname)s - %(funcName)s - %(lineno)d - %(message)s'))
+        logging.getLogger('pyrogram').addHandler(pyrogram_file_handler)
+    else:
+        logging.getLogger("pyrogram").setLevel(logging.WARNING)
+
     file_handler = logging.FileHandler('log.log')
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(coloredlogs.ColoredFormatter(
         '%(asctime)s,%(msecs)03d - %(levelname)s - %(funcName)s - %(lineno)d - %(message)s'))
-    logging.getLogger().addHandler(file_handler)
+    logging.getLogger('telegram-repeater').addHandler(file_handler)
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
     loop.close()
